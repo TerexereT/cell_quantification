@@ -1,0 +1,121 @@
+import csv
+import os
+import sys
+
+import numpy as np
+import pytest
+import tifffile
+
+TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
+if TOOLS not in sys.path:
+    sys.path.insert(0, TOOLS)
+
+import phase2_intensity  # noqa: E402
+
+
+def _write_mask_run(output_dir, run_name, stem, shape=(2, 4, 5)):
+    run_dir = output_dir / run_name
+    masks_dir = run_dir / "masks_3d"
+    masks_dir.mkdir(parents=True)
+    mask = np.zeros(shape, dtype=np.uint16)
+    label = 1
+    for y in range(2):
+        for x in range(5):
+            mask[:, y, x] = label
+            label += 1
+    mask_path = masks_dir / f"{stem}_masks_3d.tif"
+    tifffile.imwrite(str(mask_path), mask, photometric="minisblack")
+    return mask_path
+
+
+def _read_csv_rows(path):
+    with open(path, newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def test_process_output_generates_outputs_for_two_folders(tmp_path, monkeypatch):
+    output_dir = tmp_path / "output"
+    _write_mask_run(output_dir, "voxels1500", "sample")
+    _write_mask_run(output_dir, "voxels2000", "sample")
+
+    red = np.zeros((2, 4, 5), dtype=np.float32)
+    red[:, 0, 0] = 0
+    red[:, 0:2, 1:5] = 100
+    red[:, 1, 0] = 100
+    blue = np.ones((2, 4, 5), dtype=np.float32)
+    monkeypatch.setattr(phase2_intensity, "load_czi_dual_channel", lambda _p: (red, blue))
+
+    summaries = phase2_intensity.process_output("fake.czi", output_dir)
+
+    assert len(summaries) == 2
+    for run_name in ["voxels1500", "voxels2000"]:
+        run_dir = output_dir / run_name
+        assert (run_dir / "figures_qc" / "sample_qc_blue_overlay.png").is_file()
+        assert (run_dir / "figures_qc" / "sample_qc_red_overlay.png").is_file()
+        assert (run_dir / "figures_qc" / "sample_dbc1_classification.png").is_file()
+        assert (run_dir / "measurements" / "sample_dbc1_intensity.csv").is_file()
+        assert (run_dir / "masks_3d" / "sample_masks_dbc1_positive.tif").is_file()
+
+
+def test_classification_marks_visibly_low_cell_as_negative(tmp_path, monkeypatch):
+    output_dir = tmp_path / "output"
+    mask_path = _write_mask_run(output_dir, "voxels1500", "sample")
+
+    red = np.zeros((2, 4, 5), dtype=np.float32)
+    red[:, 0, 0] = 0
+    red[:, 0:2, 1:5] = 100
+    red[:, 1, 0] = 100
+    blue = np.ones((2, 4, 5), dtype=np.float32)
+    monkeypatch.setattr(phase2_intensity, "load_czi_dual_channel", lambda _p: (red, blue))
+
+    summaries = phase2_intensity.process_output("fake.czi", output_dir)
+
+    assert summaries[0]["n_negative"] == 1
+    rows = _read_csv_rows(output_dir / "voxels1500" / "measurements" / "sample_dbc1_intensity.csv")
+    cell_rows = [row for row in rows if row["cell_id"] != "__metadata__"]
+    assert cell_rows[0]["clasificacion"] == phase2_intensity.NEGATIVE_LABEL
+    assert all(row["clasificacion"] == phase2_intensity.POSITIVE_LABEL for row in cell_rows[1:])
+
+    original = tifffile.imread(str(mask_path))
+    filtered = tifffile.imread(
+        str(output_dir / "voxels1500" / "masks_3d" / "sample_masks_dbc1_positive.tif")
+    )
+    assert np.unique(filtered[filtered != 0]).size < np.unique(original[original != 0]).size
+    assert 1 not in np.unique(filtered)
+
+
+def test_missing_czi_raises_file_not_found():
+    with pytest.raises(FileNotFoundError) as exc:
+        phase2_intensity.load_czi_dual_channel("no_existe.czi")
+    assert "no_existe.czi" in str(exc.value)
+
+
+def test_no_masks_returns_empty_summary(tmp_path, monkeypatch, capsys):
+    output_dir = tmp_path / "output"
+    (output_dir / "voxels1500").mkdir(parents=True)
+    monkeypatch.setattr(
+        phase2_intensity,
+        "load_czi_dual_channel",
+        lambda _p: (np.zeros((1, 2, 2)), np.zeros((1, 2, 2))),
+    )
+
+    summaries = phase2_intensity.process_output("fake.czi", output_dir)
+
+    assert summaries == []
+    assert "Warning" in capsys.readouterr().out
+
+
+def test_uniform_cells_have_sd_zero_and_all_positive():
+    red_proj = np.full((3, 3), 10, dtype=np.float32)
+    mask_proj = np.zeros((3, 3), dtype=np.uint16)
+    mask_proj[0, 0] = 1
+    mask_proj[1, 1] = 2
+
+    rows, metadata = phase2_intensity.measure_intensity(red_proj, mask_proj)
+
+    assert metadata["SD"] == pytest.approx(0)
+    assert metadata["umbral"] == pytest.approx(metadata["media"])
+    assert [row["clasificacion"] for row in rows] == [
+        phase2_intensity.POSITIVE_LABEL,
+        phase2_intensity.POSITIVE_LABEL,
+    ]

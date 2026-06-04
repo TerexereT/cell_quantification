@@ -1,0 +1,14 @@
+name: cell_3d_analysis
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - tifffile
+  - scikit-image
+  - matplotlib
+  - pyyaml
+  - pip
+  - pip:
+      - cellpose

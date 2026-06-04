@@ -1,0 +1,8 @@
+cellpose
+numpy
+pandas
+tifffile
+scikit-image
+matplotlib
+pyyaml
+czifile

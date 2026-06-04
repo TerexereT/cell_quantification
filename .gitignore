@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Data: archivos grandes de imagen (no commitear TIFFs/CZIs de datos)
+input/raw_zstacks/
+input/metadata/
+*.tif
+*.tiff
+*.czi
+*.zarr
+
+# Output del pipeline (resultados generados, no código)
+output/*/
+output/*
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

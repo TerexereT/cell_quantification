@@ -40,11 +40,16 @@ cell_3d_analysis/
 │   └── config.yaml          # ← parámetros del pipeline
 ├── output/                  # ← se llena automáticamente
 │   ├── ejemplo_zstack/
-│   │   ├── masks_3d/
-│   │   ├── projections/
-│   │   ├── meshes/
-│   │   ├── measurements/
-│   │   └── figures_qc/
+│   │   ├── 1/              # ← salidas de Fase 1 (segmentación)
+│   │   │   ├── masks_3d/
+│   │   │   ├── projections/
+│   │   │   ├── meshes/
+│   │   │   ├── measurements/
+│   │   │   └── figures_qc/
+│   │   └── 2/              # ← salidas de Fase 2 (clasificación Dbc1)
+│   │       ├── masks_3d/
+│   │       ├── measurements/
+│   │       └── figures_qc/
 │   └── logs/               # log general de la corrida
 └── src/                     # código del pipeline
 ```
@@ -188,23 +193,45 @@ docker run --rm \
 
 ## 6. Qué significa cada archivo de salida
 
+**Fase 1** (segmentación — `python src/main.py`):
+
 | Carpeta | Archivo | Contenido |
 |---|---|---|
-| `output/<nombre>/masks_3d/` | `<nombre>_masks_3d.tif` | Máscara 3D etiquetada (0 = fondo, 1..N = células). Cada `cell_id` del CSV corresponde a ese valor en la máscara. |
-| `output/<nombre>/measurements/` | `<nombre>_measurements_3d.csv` | Una fila por célula con todas las métricas. |
-| `output/<nombre>/projections/` | `<nombre>_max_projection.tif` | Proyección de intensidad máxima de la imagen original. |
-| `output/<nombre>/projections/` | `<nombre>_mask_projection.tif` | Proyección máxima de la máscara. |
-| `output/<nombre>/meshes/` | `<nombre>_cell_<id>.obj` | Malla 3D de la superficie de cada célula (si está habilitado). |
-| `output/<nombre>/figures_qc/` | `<nombre>_qc_overlay.png` | Figura de 3 paneles (original / máscara / overlay) para revisar la segmentación. |
-| `output/logs/` | `pipeline_log.txt` | Registro completo de la ejecución (errores incluidos). |
+| `output/<nombre>/1/masks_3d/` | `<nombre>_masks_3d.tif` | Máscara 3D etiquetada (0 = fondo, 1..N = células). |
+| `output/<nombre>/1/measurements/` | `<nombre>_measurements_3d.csv` | Una fila por célula con todas las métricas 3D. |
+| `output/<nombre>/1/projections/` | `<nombre>_max_projection.tif` | Proyección de intensidad máxima de la imagen original. |
+| `output/<nombre>/1/projections/` | `<nombre>_mask_projection.tif` | Proyección máxima de la máscara. |
+| `output/<nombre>/1/meshes/` | `<nombre>_cell_<id>.obj` | Malla 3D de la superficie de cada célula (si está habilitado). |
+| `output/<nombre>/1/figures_qc/` | `<nombre>_qc_overlay.png` | Figura 3 paneles (original / máscara / overlay) para revisar la segmentación. |
+| `output/logs/` | `pipeline_log.txt` | Registro completo de la ejecución. |
 
-### Columnas del CSV
+**Fase 2** (clasificación Dbc1 — `python tools/phase2_intensity.py`):
+
+| Carpeta | Archivo | Contenido |
+|---|---|---|
+| `output/<nombre>/2/masks_3d/` | `<nombre>_masks_dbc1_positive.tif` | Máscara original con labels Dbc1− puestos a 0. |
+| `output/<nombre>/2/measurements/` | `<nombre>_dbc1_intensity.csv` | Intensidad por célula + clasificación Dbc1+/Dbc1−. |
+| `output/<nombre>/2/figures_qc/` | `<nombre>_dbc1_classification.png` | 3 paneles: canal rojo / máscara clasificada (verde=+, rojo=−) / overlay. |
+| `output/<nombre>/2/figures_qc/` | `<nombre>_qc_red_overlay.png` | Overlay canal rojo con todas las máscaras. |
+| `output/<nombre>/2/figures_qc/` | `<nombre>_qc_blue_overlay.png` | Overlay canal azul (DAPI) con todas las máscaras. |
+
+### Columnas del CSV — Fase 1 (`_measurements_3d.csv`)
 
 `filename, cell_id, voxel_count, volume_um3, surface_area_um2,
 projected_area_xy_um2, z_slices_detected, bbox_z_min, bbox_z_max, bbox_y_min,
 bbox_y_max, bbox_x_min, bbox_x_max`
 
 Los `bbox_*` son índices (en voxeles) **inclusivos** del bounding box 3D.
+
+### Columnas del CSV — Fase 2 (`_dbc1_intensity.csv`)
+
+`cell_id, area_px, mean_intensity_red, mean_intensity_corr, IntDen,
+IntDen_corregida, clasificacion, bkg_pp, PromIntDen_BKG, umbral,
+n_positivas, n_negativas`
+
+- **`mean_intensity_corr`** — intensidad media por pixel corregida por fondo (`mean_intensity_red − bkg_pp`). Es la métrica usada para la clasificación.
+- **`IntDen` / `IntDen_corregida`** — densidad integrada (área × intensidad media), reportada para referencia con el protocolo Fiji.
+- **`clasificacion`** — `Dbc1+` o `Dbc1−`. La última fila (`__metadata__`) contiene los parámetros del umbral aplicado.
 
 ---
 
@@ -271,7 +298,7 @@ Para convertir archivos `.czi` (sección 9) se necesita además **`czifile`**
    ```
 
 4. **Revisa** los resultados en `output/` (ver sección 6). Mira primero el PNG de
-   `output/<nombre>/figures_qc/` para confirmar que la segmentación es razonable antes de
+   `output/<nombre>/1/figures_qc/` para confirmar que la segmentación es razonable antes de
    confiar en las métricas.
 
 ### B) Si tienes un archivo `.czi` (Zeiss)
@@ -345,7 +372,7 @@ Estos son los valores ya puestos en `config.yaml`, equivalentes a los de la GUI:
 
 ### 10.3 Cómo evaluar la forma y qué tocar
 
-Tras cada corrida, abre `output/<nombre>/figures_qc/<nombre>_qc_overlay.png` (3 paneles:
+Tras cada corrida, abre `output/<nombre>/1/figures_qc/<nombre>_qc_overlay.png` (3 paneles:
 original / máscara / overlay) y compara contra lo que esperas de tus núcleos:
 
 | Lo que ves en el overlay | Qué ajustar en `config.yaml` | Hacia dónde |
@@ -403,6 +430,81 @@ Edita `config/config.yaml`, guarda y vuelve a correr (sobrescribe `output/`):
 
 > **GPU automática**: con `gpu: auto` el pipeline usa la GPU si hay CUDA disponible
 > y cae a CPU si no, sin que cambies nada (ver sección 5, nota de GPU).
+
+---
+
+## 11. Fase 2 — Clasificación Dbc1+/Dbc1− por intensidad
+
+Tras ejecutar el pipeline de Fase 1 (que genera las máscaras 3D), la Fase 2
+mide la intensidad del marcador Dbc1 (canal rojo, Alexa Fluor 647) en cada
+célula detectada y las clasifica como positivas o negativas.
+
+### 11.1 Prerequisitos
+
+- Haber corrido la Fase 1 al menos una vez (carpetas con `masks_3d/` en `output/`).
+- Tener el archivo `.czi` original (ambos canales: rojo=0, azul=1).
+- Dependencia `czifile` instalada:
+  ```powershell
+  ./venv/Scripts/pip.exe install czifile
+  ```
+
+### 11.2 Ejecutar la Fase 2
+
+Desde la raíz del proyecto (`cell_3d_analysis/`):
+
+```powershell
+./venv/Scripts/python.exe tools/phase2_intensity.py "..\ruta\a\imagen.czi" output/
+```
+
+Con factor personalizado (ver 11.4):
+
+```powershell
+./venv/Scripts/python.exe tools/phase2_intensity.py "..\ruta\a\imagen.czi" output/ --factor 1.0
+```
+
+El script descubre automáticamente todas las subcarpetas de `output/` que
+tengan `masks_3d/` y las procesa en secuencia.
+
+### 11.3 Archivos generados por carpeta
+
+| Archivo | Contenido |
+|---|---|
+| `figures_qc/<stem>_qc_red_overlay.png` | Overlay canal rojo con todas las máscaras |
+| `figures_qc/<stem>_qc_blue_overlay.png` | Overlay canal azul (DAPI) con todas las máscaras |
+| `figures_qc/<stem>_dbc1_classification.png` | 3 paneles: canal rojo / máscara clasificada (verde=Dbc1+, rojo=Dbc1−) / overlay |
+| `measurements/<stem>_dbc1_intensity.csv` | Una fila por célula con métricas de intensidad y clasificación |
+| `masks_3d/<stem>_masks_dbc1_positive.tif` | Máscara igual a la original pero con labels Dbc1− puestos a 0 |
+
+### 11.4 Ajustar el umbral de clasificación
+
+La clasificación usa la **intensidad media corregida por background** (`mean_intensity_corr`),
+que es independiente del tamaño celular:
+
+```
+bkg_pp         = intensidad media de pixels fuera de todas las máscaras
+mean_int_corr  = mean_intensity_red − bkg_pp  (por célula)
+umbral         = media(todas) − factor × SD(todas)
+célula Dbc1−   si mean_int_corr < umbral
+```
+
+El parámetro `--factor` controla la sensibilidad:
+
+| `--factor` | Efecto | Cuándo usarlo |
+|---|---|---|
+| `0.5` | Detecta ~30% de células como negativas (umbral alto) | Si ves muchas células tenues que se pierden |
+| `1.0` | Umbral moderado | Punto de partida recomendado |
+| `1.6` | Default (umbral más bajo) | Si la mayoría son positivas y pocas son negativas |
+| `2.0` | Umbral muy bajo, pocas negativas | Si sólo quieres capturar las más débiles |
+
+**Flujo de ajuste recomendado:**
+
+1. Corre con `--factor 1.0` y abre `*_dbc1_classification.png`.
+2. Si aún faltan células negativas visibles, baja: `--factor 0.5`.
+3. Si clasifica como negativas células que visualmente tienen señal, sube: `--factor 1.5`.
+4. Compara el overlay 3 de la figura contra el canal rojo (panel 1) para validar.
+
+El CSV siempre incluye `mean_intensity_corr` y `IntDen_corregida` para que
+puedas inspecionar los valores y decidir el factor apropiado.
 
 ---
 

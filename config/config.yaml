@@ -1,0 +1,38 @@
+# ============================================================
+# Configuración del pipeline de análisis 3D de células
+# ============================================================
+# Todas las rutas son relativas a la raíz del proyecto
+# (la carpeta cell_3d_analysis/), no a src/.
+
+input_dir: "input/raw_zstacks" # Carpeta con los z-stacks .tif/.tiff
+metadata_file: "input/metadata/metadata.csv"
+output_dir: "output" # Carpeta raíz de salidas
+
+# ------------------------------------------------------------
+# Parámetros de segmentación con Cellpose
+# ------------------------------------------------------------
+cellpose:
+  gpu: auto # auto = GPU si hay CUDA, si no CPU; o true/false explícito
+  model_type: "cyto2" # Ref. de tus notas (núcleos DAPI). Cellpose-SAM v4 lo IGNORA.
+  diameter: null # null = autodetección. Fija el diámetro nuclear en px si lo mediste.
+  do_3D: true # Segmentación 3D real sobre el volumen completo
+  z_axis: 0 # Eje Z dentro del array de la imagen
+  channel_axis: null # Eje de canal (null si la imagen es grayscale Z×Y×X)
+  flow_threshold: 0.2 # Notas: 0.2 ayuda a separar núcleos pegados (menor = separa más)
+  cellprob_threshold: -3.0 # Notas: -3 capta núcleos más débiles (menor = más detecciones)
+  min_size_voxels: 2000 # Objetos con menos voxeles que esto se descartan (filtro 3D)
+
+# ------------------------------------------------------------
+# Mediciones por célula
+# ------------------------------------------------------------
+measurements:
+  save_individual_cell_meshes: true # Exporta una malla .obj por célula
+  calculate_surface_area: true # Área de superficie 3D (marching cubes)
+  calculate_projected_area_xy: true # Área proyectada en el plano XY
+
+# ------------------------------------------------------------
+# Control de calidad (QC)
+# ------------------------------------------------------------
+qc:
+  save_overlay_projection: true # Figura overlay imagen + máscara
+  save_mask_projection: true # Proyección máxima de la máscara
