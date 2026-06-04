@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import tifffile  # noqa: E402
 from skimage.color import label2rgb  # noqa: E402
+from skimage.filters import threshold_otsu  # noqa: E402
 
 try:
     import czifile
@@ -38,8 +39,13 @@ def _size_from_metadata(meta, tag):
     return int(match.group(1)) if match else 1
 
 
-def load_czi_dual_channel(czi_path):
-    """Lee un CZI y devuelve los canales rojo(0) y azul(1) como (Z, Y, X)."""
+def load_czi_dual_channel(czi_path, red_channel=0, blue_channel=1):
+    """Lee un CZI y devuelve (canal_rojo, canal_azul) como volúmenes (Z, Y, X).
+
+    red_channel / blue_channel: índices de canal dentro del CZI (0-based,
+    igual que czifile). En Fiji los canales se muestran como C=1, C=2, etc.
+    (1-indexed), así que C=1 en Fiji = índice 0 aquí.
+    """
     czi_path = Path(czi_path)
     if not czi_path.is_file():
         raise FileNotFoundError(f"No se encontró el CZI: {czi_path}")
@@ -54,6 +60,9 @@ def load_czi_dual_channel(czi_path):
     size_z = _size_from_metadata(meta, "SizeZ")
     if size_c < 2:
         raise ValueError(f"El CZI debe tener al menos 2 canales; SizeC={size_c}")
+    for idx, name in ((red_channel, "red_channel"), (blue_channel, "blue_channel")):
+        if idx >= size_c:
+            raise ValueError(f"--{name} {idx} fuera de rango: el CZI tiene {size_c} canales (0–{size_c-1}).")
 
     arr = np.squeeze(arr)
     channel_axes = [i for i, size in enumerate(arr.shape) if size == size_c]
@@ -61,8 +70,9 @@ def load_czi_dual_channel(czi_path):
         raise ValueError(f"No se pudo localizar el eje de canales en forma {arr.shape}")
     channel_axis = channel_axes[0]
 
-    red = _extract_channel_zyx(arr, channel_axis, 0, size_z)
-    blue = _extract_channel_zyx(arr, channel_axis, 1, size_z)
+    print(f"  CZI shape (squeeze): {arr.shape}  |  eje canales: {channel_axis}  |  rojo=canal{red_channel}  azul=canal{blue_channel}")
+    red = _extract_channel_zyx(arr, channel_axis, red_channel, size_z)
+    blue = _extract_channel_zyx(arr, channel_axis, blue_channel, size_z)
     return red, blue
 
 
@@ -102,7 +112,7 @@ def discover_mask_files(output_dir):
         return []
 
     mask_files = []
-    for child in sorted(p for p in output_dir.iterdir() if p.is_dir()):
+    for child in sorted(p for p in output_dir.iterdir() if p.is_dir() and p.name != "logs"):
         phase1_dir = child / "1"
         masks_dir = phase1_dir / "masks_3d"
         if not masks_dir.is_dir():
@@ -123,69 +133,96 @@ def image_stem_from_mask(mask_path):
     return stem
 
 
-def measure_intensity(red_proj, mask_proj, threshold_factor=DEFAULT_THRESHOLD_FACTOR):
-    """Calcula áreas, IntDen, background, umbral y clasificación por label.
+def measure_intensity(red_proj, mask_proj, red_volume, mask_3d,
+                      threshold_factor=None, threshold_value=None):
+    """Calcula métricas 2D (proyección máx) y 3D (volumen completo) por célula.
 
-    Clasificación basada en mean_intensity_red corregida por BKG por pixel,
-    que es independiente del tamaño celular a diferencia de IntDen.
-    IntDen e IntDen_corregida se siguen reportando en el CSV para referencia.
+    2D: area_px, mean_intensity_red, IntDen — sobre la proyección máxima en Z.
+    3D: voxel_count_3d, IntDen_3D, mean_intensity_3D — sobre todos los voxeles.
+    Clasificación: Otsu sobre mean_intensity_red (2D) salvo override con
+    --factor o --threshold.
     """
-    red_proj = np.asarray(red_proj, dtype=np.float64)
-    mask_proj = np.asarray(mask_proj)
+    red_proj   = np.asarray(red_proj,   dtype=np.float64)
+    mask_proj  = np.asarray(mask_proj)
+    red_volume = np.asarray(red_volume, dtype=np.float64)
+    mask_3d    = np.asarray(mask_3d)
+
     labels = np.unique(mask_proj)
     labels = labels[labels != 0]
 
+    # BKG 2D (proyección)
     background_pixels = red_proj[mask_proj == 0]
     bkg_pp = float(np.mean(background_pixels)) if background_pixels.size else 0.0
 
+    # BKG 3D (todos los voxeles fuera de máscara)
+    background_voxels = red_volume[mask_3d == 0]
+    bkg_pp_3d = float(np.mean(background_voxels)) if background_voxels.size else 0.0
+
     rows = []
     for label in labels:
-        pixels = mask_proj == label
-        area = int(np.count_nonzero(pixels))
-        mean_intensity = float(np.mean(red_proj[pixels])) if area else 0.0
-        intden = float(area * mean_intensity)
-        rows.append(
-            {
-                "cell_id": int(label),
-                "area_px": area,
-                "mean_intensity_red": mean_intensity,
-                "mean_intensity_corr": mean_intensity - bkg_pp,
-                "IntDen": intden,
-            }
-        )
+        # --- 2D ---
+        pixels_2d = mask_proj == label
+        area      = int(np.count_nonzero(pixels_2d))
+        mean_int  = float(np.mean(red_proj[pixels_2d])) if area else 0.0
+        intden    = float(area * mean_int)
+
+        # --- 3D ---
+        voxels_3d      = mask_3d == label
+        voxel_count_3d = int(np.count_nonzero(voxels_3d))
+        if voxel_count_3d:
+            intden_3d      = float(red_volume[voxels_3d].sum())
+            mean_int_3d    = float(red_volume[voxels_3d].mean())
+        else:
+            intden_3d   = 0.0
+            mean_int_3d = 0.0
+
+        rows.append({
+            "cell_id":            int(label),
+            # 2D
+            "area_px":            area,
+            "mean_intensity_red": mean_int,
+            "mean_intensity_corr": mean_int - bkg_pp,
+            "IntDen":             intden,
+            # 3D
+            "voxel_count_3d":     voxel_count_3d,
+            "IntDen_3D":          intden_3d,
+            "IntDen_3D_corr":     intden_3d - bkg_pp_3d * voxel_count_3d,
+            "mean_intensity_3D":  mean_int_3d,
+        })
 
     if not rows:
         return rows, {
-            "bkg_pp": bkg_pp,
-            "PromIntDen_BKG": 0.0,
-            "umbral": 0.0,
-            "media": 0.0,
-            "SD": 0.0,
-            "n_positivas": 0,
-            "n_negativas": 0,
+            "bkg_pp": bkg_pp, "bkg_pp_3d": bkg_pp_3d,
+            "PromIntDen_BKG": 0.0, "umbral": 0.0,
+            "metodo_umbral": "otsu", "n_positivas": 0, "n_negativas": 0,
         }
 
-    areas = np.array([row["area_px"] for row in rows], dtype=np.float64)
-    intdens = np.array([row["IntDen"] for row in rows], dtype=np.float64)
+    areas   = np.array([r["area_px"] for r in rows], dtype=np.float64)
+    intdens = np.array([r["IntDen"]  for r in rows], dtype=np.float64)
     bkg_image = bkg_pp * float(np.median(areas))
-    bkg_cell = float(np.min(intdens))
-    prom_bkg = (bkg_image + bkg_cell) / 2.0
+    bkg_cell  = float(np.min(intdens))
+    prom_bkg  = (bkg_image + bkg_cell) / 2.0
 
-    # IntDen corregida (para referencia, no se usa en la clasificación)
     intden_corrected = intdens - prom_bkg
     for row, ic in zip(rows, intden_corrected):
         row["IntDen_corregida"] = float(ic)
 
-    # Clasificación por mean_intensity_corr (independiente del tamaño celular)
-    mean_corr_vals = np.array([row["mean_intensity_corr"] for row in rows], dtype=np.float64)
-    mean_val = float(np.mean(mean_corr_vals))
-    sd_val = float(np.std(mean_corr_vals))
-    threshold = mean_val - threshold_factor * sd_val
+    intensities = np.array([r["mean_intensity_red"] for r in rows], dtype=np.float64)
+
+    if threshold_value is not None:
+        threshold = float(threshold_value)
+        method = f"fixed({threshold_value})"
+    elif threshold_factor is not None:
+        threshold = float(np.mean(intensities)) - threshold_factor * float(np.std(intensities))
+        method = f"mean-{threshold_factor}sd"
+    else:
+        threshold = float(threshold_otsu(intensities))
+        method = "otsu"
 
     n_pos = 0
     n_neg = 0
-    for row, mc in zip(rows, mean_corr_vals):
-        classification = POSITIVE_LABEL if mc >= threshold else NEGATIVE_LABEL
+    for row in rows:
+        classification = POSITIVE_LABEL if row["mean_intensity_red"] >= threshold else NEGATIVE_LABEL
         row["clasificacion"] = classification
         if classification == POSITIVE_LABEL:
             n_pos += 1
@@ -193,11 +230,10 @@ def measure_intensity(red_proj, mask_proj, threshold_factor=DEFAULT_THRESHOLD_FA
             n_neg += 1
 
     metadata = {
-        "bkg_pp": bkg_pp,
+        "bkg_pp": bkg_pp, "bkg_pp_3d": bkg_pp_3d,
         "PromIntDen_BKG": float(prom_bkg),
         "umbral": float(threshold),
-        "media": mean_val,
-        "SD": sd_val,
+        "metodo_umbral": method,
         "n_positivas": n_pos,
         "n_negativas": n_neg,
     }
@@ -266,15 +302,24 @@ def save_classification_figure(red_proj, mask_proj, rows, metadata, out_path, ti
 def write_measurements_csv(out_path, rows, metadata):
     fieldnames = [
         "cell_id",
+        # 2D (proyección máxima)
         "area_px",
         "mean_intensity_red",
         "mean_intensity_corr",
         "IntDen",
         "IntDen_corregida",
+        # 3D (volumen completo)
+        "voxel_count_3d",
+        "IntDen_3D",
+        "IntDen_3D_corr",
+        "mean_intensity_3D",
+        # clasificación y metadatos
         "clasificacion",
         "bkg_pp",
+        "bkg_pp_3d",
         "PromIntDen_BKG",
         "umbral",
+        "metodo_umbral",
         "n_positivas",
         "n_negativas",
     ]
@@ -285,12 +330,14 @@ def write_measurements_csv(out_path, rows, metadata):
             writer.writerow(row)
         writer.writerow(
             {
-                "cell_id": "__metadata__",
-                "bkg_pp": metadata["bkg_pp"],
+                "cell_id":        "__metadata__",
+                "bkg_pp":         metadata["bkg_pp"],
+                "bkg_pp_3d":      metadata["bkg_pp_3d"],
                 "PromIntDen_BKG": metadata["PromIntDen_BKG"],
-                "umbral": metadata["umbral"],
-                "n_positivas": metadata["n_positivas"],
-                "n_negativas": metadata["n_negativas"],
+                "umbral":         metadata["umbral"],
+                "metodo_umbral":  metadata["metodo_umbral"],
+                "n_positivas":    metadata["n_positivas"],
+                "n_negativas":    metadata["n_negativas"],
             }
         )
 
@@ -304,7 +351,8 @@ def save_positive_mask(mask_path, rows, out_path):
     tifffile.imwrite(str(out_path), positive_mask.astype(mask.dtype), photometric="minisblack")
 
 
-def process_mask(mask_path, red_proj, blue_proj, threshold_factor=DEFAULT_THRESHOLD_FACTOR):
+def process_mask(mask_path, red_proj, blue_proj, red_volume,
+                 threshold_factor=None, threshold_value=None):
     mask_path = Path(mask_path)
     # mask_path: output/<exp>/1/masks_3d/<file>.tif
     # Phase 2 outputs go to output/<exp>/2/
@@ -318,8 +366,8 @@ def process_mask(mask_path, red_proj, blue_proj, threshold_factor=DEFAULT_THRESH
     masks_out_dir.mkdir(parents=True, exist_ok=True)
 
     stem = image_stem_from_mask(mask_path)
-    mask = tifffile.imread(str(mask_path))
-    mask_proj = max_project(mask)
+    mask_3d   = tifffile.imread(str(mask_path))
+    mask_proj = max_project(mask_3d)
 
     if red_proj.shape != mask_proj.shape or blue_proj.shape != mask_proj.shape:
         raise ValueError(
@@ -340,7 +388,9 @@ def process_mask(mask_path, red_proj, blue_proj, threshold_factor=DEFAULT_THRESH
         f"{stem} - canal rojo",
     )
 
-    rows, metadata = measure_intensity(red_proj, mask_proj, threshold_factor)
+    rows, metadata = measure_intensity(
+        red_proj, mask_proj, red_volume, mask_3d, threshold_factor, threshold_value
+    )
     write_measurements_csv(measurements_dir / f"{stem}_dbc1_intensity.csv", rows, metadata)
     save_positive_mask(mask_path, rows, masks_out_dir / f"{stem}{POSITIVE_MASK_SUFFIX}.tif")
     save_classification_figure(
@@ -361,8 +411,9 @@ def process_mask(mask_path, red_proj, blue_proj, threshold_factor=DEFAULT_THRESH
     }
 
 
-def process_output(czi_path, output_dir, threshold_factor=DEFAULT_THRESHOLD_FACTOR):
-    red_volume, blue_volume = load_czi_dual_channel(czi_path)
+def process_output(czi_path, output_dir, threshold_factor=None, threshold_value=None,
+                   red_channel=0, blue_channel=1):
+    red_volume, blue_volume = load_czi_dual_channel(czi_path, red_channel, blue_channel)
     red_proj = max_project(red_volume)
     blue_proj = max_project(blue_volume)
 
@@ -374,7 +425,10 @@ def process_output(czi_path, output_dir, threshold_factor=DEFAULT_THRESHOLD_FACT
     summaries = []
     for mask_path in mask_files:
         print(f"Procesando {mask_path}")
-        summaries.append(process_mask(mask_path, red_proj, blue_proj, threshold_factor))
+        summaries.append(process_mask(
+            mask_path, red_proj, blue_proj, red_volume,
+            threshold_factor, threshold_value,
+        ))
     return summaries
 
 
@@ -399,16 +453,42 @@ def main(argv=None):
     parser.add_argument(
         "--factor",
         type=float,
-        default=DEFAULT_THRESHOLD_FACTOR,
+        default=None,
         help=(
-            f"Factor k para el umbral: media - k×SD de la intensidad media corregida. "
-            f"Valores más bajos detectan menos negativas; más altos detectan más. "
-            f"Default: {DEFAULT_THRESHOLD_FACTOR}. Prueba 0.5, 1.0, 1.6, 2.0."
+            "Usa media - k×SD de mean_intensity_red como umbral. "
+            "Ejemplo: --factor 1.0. Si no se pasa, se usa Otsu (default)."
         ),
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help=(
+            "Umbral fijo de mean_intensity_red. Células con valor menor son Dbc1-. "
+            "Ejemplo: --threshold 5000. Tiene prioridad sobre --factor y Otsu."
+        ),
+    )
+    parser.add_argument(
+        "--red-channel",
+        type=int,
+        default=0,
+        dest="red_channel",
+        help="Índice de canal rojo (AF647/Dbc1) en el CZI. Default: 0. En Fiji C=1 = índice 0.",
+    )
+    parser.add_argument(
+        "--blue-channel",
+        type=int,
+        default=1,
+        dest="blue_channel",
+        help="Índice de canal azul (DAPI) en el CZI. Default: 1. En Fiji C=2 = índice 1.",
     )
     args = parser.parse_args(argv)
 
-    summaries = process_output(args.czi, args.output, args.factor)
+    summaries = process_output(
+        args.czi, args.output,
+        args.factor, args.threshold,
+        args.red_channel, args.blue_channel,
+    )
     print_summary(summaries)
     return 0
 

@@ -225,35 +225,88 @@ Los `bbox_*` son índices (en voxeles) **inclusivos** del bounding box 3D.
 
 ### Columnas del CSV — Fase 2 (`_dbc1_intensity.csv`)
 
-`cell_id, area_px, mean_intensity_red, mean_intensity_corr, IntDen,
-IntDen_corregida, clasificacion, bkg_pp, PromIntDen_BKG, umbral,
-n_positivas, n_negativas`
+**2D** (calculado sobre la proyección máxima en Z):
 
-- **`mean_intensity_corr`** — intensidad media por pixel corregida por fondo (`mean_intensity_red − bkg_pp`). Es la métrica usada para la clasificación.
-- **`IntDen` / `IntDen_corregida`** — densidad integrada (área × intensidad media), reportada para referencia con el protocolo Fiji.
-- **`clasificacion`** — `Dbc1+` o `Dbc1−`. La última fila (`__metadata__`) contiene los parámetros del umbral aplicado.
+`cell_id, area_px, mean_intensity_red, mean_intensity_corr, IntDen, IntDen_corregida`
+
+**3D** (calculado sobre el volumen rojo completo, todos los Z):
+
+`voxel_count_3d, IntDen_3D, IntDen_3D_corr, mean_intensity_3D`
+
+**Clasificación y metadatos** (última fila `__metadata__`):
+
+`clasificacion, bkg_pp, bkg_pp_3d, PromIntDen_BKG, umbral, metodo_umbral, n_positivas, n_negativas`
 
 ---
 
-## 7. Cómo interpretar las métricas
+## 7. Fórmulas matemáticas de los measurements
 
-- **`volume_um3`** — Volumen de la célula en micras cúbicas.
-  Se calcula como `voxel_count × px_xy_um² × px_z_um`. Es la suma del volumen
-  físico de todos los voxeles que pertenecen a la célula.
+### 7.1 Fase 1 — Morfología 3D
 
-- **`surface_area_um2`** — Área de la superficie 3D en micras cuadradas.
-  Se obtiene reconstruyendo la superficie con *marching cubes* (con el
-  espaciado físico real `(px_z, px_xy, px_xy)`) y sumando el área de los
-  triángulos de la malla. Refleja lo "rugosa" o ramificada que es la célula:
-  para un mismo volumen, mayor área = forma más irregular.
-  Puede ser `NaN` si la célula es demasiado pequeña para reconstruir una malla.
+Sea `V` el conjunto de voxeles de la célula en la máscara 3D `(Z, Y, X)`:
 
-- **`projected_area_xy_um2`** — Área de la "sombra" de la célula sobre el plano
-  XY. Es el número de píxeles que ocupa la célula al colapsar el eje Z,
-  multiplicado por `px_xy_um²`. Útil para comparar con mediciones clásicas 2D.
+| Columna | Fórmula |
+|---|---|
+| `voxel_count` | `|V|` — número de voxeles con ese label |
+| `volume_um3` | `|V| × px_xy² × px_z` |
+| `projected_area_xy_um2` | `|{(y,x) : ∃z, (z,y,x) ∈ V}| × px_xy²` — píxeles únicos en proyección XY |
+| `z_slices_detected` | `|{z : ∃(y,x), (z,y,x) ∈ V}|` — cortes Z con al menos un voxel |
+| `surface_area_um2` | Área de la malla triangular generada por *marching cubes* sobre la máscara binaria de la célula con `spacing = (px_z, px_xy, px_xy)` |
+| `bbox_z_min/max` | `min/max z` de todos los voxeles de la célula |
+| `bbox_y_min/max` | `min/max y` de todos los voxeles de la célula |
+| `bbox_x_min/max` | `min/max x` de todos los voxeles de la célula |
 
-- **`z_slices_detected`** — En cuántos cortes Z aparece la célula. Da una idea
-  de su extensión en profundidad.
+### 7.2 Fase 2 — Intensidad 2D (proyección máxima en Z)
+
+La proyección máxima colapsa el eje Z tomando el valor máximo pixel a pixel:
+
+```
+red_proj(y,x)  = max over z of red_volume(z,y,x)
+mask_proj(y,x) = max over z of mask_3d(z,y,x)
+```
+
+Sea `P_c` el conjunto de píxeles de la célula `c` en `mask_proj`:
+
+| Columna | Fórmula |
+|---|---|
+| `area_px` | `|P_c|` |
+| `mean_intensity_red` | `(1/|P_c|) × Σ red_proj(p)` para `p ∈ P_c` |
+| `bkg_pp` | `mean(red_proj(p))` para todos los `p` donde `mask_proj = 0` |
+| `mean_intensity_corr` | `mean_intensity_red − bkg_pp` |
+| `IntDen` | `area_px × mean_intensity_red` |
+| `BKG_imagen` | `bkg_pp × median(area_px de todas las células)` |
+| `BKG_célula` | `min(IntDen)` entre todas las células |
+| `PromIntDen_BKG` | `(BKG_imagen + BKG_célula) / 2` |
+| `IntDen_corregida` | `IntDen − PromIntDen_BKG` |
+
+### 7.3 Fase 2 — Intensidad 3D (volumen completo)
+
+Sea `W_c` el conjunto de voxeles de la célula `c` en `mask_3d`:
+
+| Columna | Fórmula |
+|---|---|
+| `voxel_count_3d` | `|W_c|` |
+| `IntDen_3D` | `Σ red_volume(w)` para `w ∈ W_c` |
+| `mean_intensity_3D` | `IntDen_3D / voxel_count_3d` |
+| `bkg_pp_3d` | `mean(red_volume(w))` para todos los `w` donde `mask_3d = 0` |
+| `IntDen_3D_corr` | `IntDen_3D − bkg_pp_3d × voxel_count_3d` |
+
+### 7.4 Fase 2 — Umbral de clasificación
+
+El umbral se aplica sobre `mean_intensity_red` (2D). Hay tres modos, en orden de prioridad:
+
+| Modo | Argumento CLI | Fórmula del umbral |
+|---|---|---|
+| **Otsu** (default) | _(ninguno)_ | Minimiza la varianza intra-clase sobre el histograma de `mean_intensity_red` |
+| **Factor SD** | `--factor k` | `mean(mean_intensity_red) − k × SD(mean_intensity_red)` |
+| **Valor fijo** | `--threshold T` | `T` (en unidades de intensidad raw del canal rojo) |
+
+Regla de clasificación:
+
+```
+célula Dbc1+  si  mean_intensity_red ≥ umbral
+célula Dbc1−  si  mean_intensity_red <  umbral
+```
 
 ---
 
@@ -465,7 +518,31 @@ Con factor personalizado (ver 11.4):
 El script descubre automáticamente todas las subcarpetas de `output/` que
 tengan `masks_3d/` y las procesa en secuencia.
 
-### 11.3 Archivos generados por carpeta
+### 11.3 Interpretar el resumen en consola
+
+Al terminar, el script imprime una tabla como esta:
+
+```
+Resumen:
+carpeta | N_células | N_Dbc1+ | N_Dbc1- | umbral
+output\cre+342_17...-voxels2000\2 | 347 | 310 | 37 | 8547.231
+```
+
+El valor **`umbral`** es el corte de `mean_intensity_red` (intensidad media del
+canal rojo en unidades raw del detector, escala 0–65535 para imágenes 16-bit)
+que separa las dos poblaciones:
+
+```
+célula Dbc1+  si  mean_intensity_red ≥ umbral
+célula Dbc1−  si  mean_intensity_red <  umbral
+```
+
+Con Otsu (modo default) ese número es el valle natural del histograma de
+`mean_intensity_red` entre las células tenues y las brillantes. Para verificarlo
+en Fiji: selecciona una célula que visualmente parezca negativa, mide su
+intensidad media en el canal rojo — debería estar por debajo de ese valor.
+
+### 11.5 Archivos generados por carpeta
 
 | Archivo | Contenido |
 |---|---|
@@ -475,7 +552,7 @@ tengan `masks_3d/` y las procesa en secuencia.
 | `measurements/<stem>_dbc1_intensity.csv` | Una fila por célula con métricas de intensidad y clasificación |
 | `masks_3d/<stem>_masks_dbc1_positive.tif` | Máscara igual a la original pero con labels Dbc1− puestos a 0 |
 
-### 11.4 Ajustar el umbral de clasificación
+### 11.6 Ajustar el umbral de clasificación
 
 La clasificación usa la **intensidad media corregida por background** (`mean_intensity_corr`),
 que es independiente del tamaño celular:
