@@ -13,8 +13,6 @@ venv/
 env/
 
 # Data: archivos grandes de imagen (no commitear TIFFs/CZIs de datos)
-input/raw_zstacks/
-input/metadata/
 *.tif
 *.tiff
 *.czi
