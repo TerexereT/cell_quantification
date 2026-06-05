@@ -7,18 +7,16 @@ visualize_qc y el orquestador main, incluyendo casos de éxito, error y borde.
 
 import os
 
+import io_utils
+import measure_3d
 import numpy as np
 import pandas as pd
 import pytest
-import tifffile
-
-import io_utils
-import measure_3d
 import segment_cellpose_3d
+import tifffile
 import visualize_qc
 from conftest import make_cube_mask
 from utils import stem
-
 
 # ======================================================================
 # io_utils
@@ -316,7 +314,7 @@ def _write_project(tmp_path, mask_to_return, filename="ejemplo_zstack.tif"):
         f'metadata_file: "{(tmp_path / "input" / "metadata" / "metadata.csv").as_posix()}"\n'
         f'output_dir: "{(tmp_path / "output").as_posix()}"\n'
         "cellpose:\n"
-        "  gpu: false\n"
+        "  gpu: auto\n"
         "  model_type: cyto3\n"
         "  diameter: null\n"
         "  do_3D: true\n"

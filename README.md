@@ -77,13 +77,13 @@ cell_3d_analysis/
 
 Una fila por imagen. Columnas mínimas obligatorias:
 
-| Columna | Tipo | Significado |
-|---|---|---|
-| `filename` | texto | Nombre del archivo en `input/raw_zstacks/` |
-| `px_xy_um` | float | Tamaño de pixel lateral en µm |
-| `px_z_um` | float | Distancia entre cortes Z en µm |
-| `channel_to_segment` | entero | Canal a segmentar (0 si es grayscale) |
-| `notes` | texto | Comentario libre (opcional) |
+| Columna              | Tipo   | Significado                                |
+| -------------------- | ------ | ------------------------------------------ |
+| `filename`           | texto  | Nombre del archivo en `input/raw_zstacks/` |
+| `px_xy_um`           | float  | Tamaño de pixel lateral en µm              |
+| `px_z_um`            | float  | Distancia entre cortes Z en µm             |
+| `channel_to_segment` | entero | Canal a segmentar (0 si es grayscale)      |
+| `notes`              | texto  | Comentario libre (opcional)                |
 
 ```csv
 filename,px_xy_um,px_z_um,channel_to_segment,notes
@@ -134,7 +134,7 @@ metadata_file: "input/metadata/metadata.csv"
 output_dir: "output"
 
 cellpose:
-  gpu: false                # true si tienes GPU con CUDA; "auto" detecta automáticamente
+  gpu: auto                # true si tienes GPU con CUDA; "auto" detecta automáticamente
   model_type: "cyto3"       # ignorado en Cellpose v4 (Cellpose-SAM)
   diameter: null            # null = autodetección; o un número en píxeles
   do_3D: true               # NO cambiar
@@ -156,14 +156,14 @@ qc:
 
 Guía de ajuste rápido (revisa `output/<nombre>/1/figures_qc/*_qc_overlay.png` después de cada corrida):
 
-| Lo que ves en el overlay | Parámetro | Acción |
-|---|---|---|
-| Muchas manchitas espurias | `min_size_voxels` | Subir: 100 → 500 → 1000 |
-| Núcleos pegados como uno | `flow_threshold` | Bajar: 0.2 → 0.1 |
-| Un núcleo partido en varios | `flow_threshold` | Subir: 0.2 → 0.4 |
-| Faltan núcleos tenues | `cellprob_threshold` | Bajar: -3 → -5 |
-| Fondo detectado como célula | `cellprob_threshold` | Subir: -3 → -1 → 0 |
-| Núcleos sub/sobredimensionados | `diameter` | Fijar en px (ver abajo) |
+| Lo que ves en el overlay       | Parámetro            | Acción                  |
+| ------------------------------ | -------------------- | ----------------------- |
+| Muchas manchitas espurias      | `min_size_voxels`    | Subir: 100 → 500 → 1000 |
+| Núcleos pegados como uno       | `flow_threshold`     | Bajar: 0.2 → 0.1        |
+| Un núcleo partido en varios    | `flow_threshold`     | Subir: 0.2 → 0.4        |
+| Faltan núcleos tenues          | `cellprob_threshold` | Bajar: -3 → -5          |
+| Fondo detectado como célula    | `cellprob_threshold` | Subir: -3 → -1 → 0      |
+| Núcleos sub/sobredimensionados | `diameter`           | Fijar en px (ver abajo) |
 
 **Cómo fijar el diámetro nuclear:** mide ~6 núcleos en Fiji con la herramienta
 de línea (`Analyze → Measure`), promedia los `Length` y conviértelo a píxeles
@@ -178,14 +178,14 @@ cellpose:
 
 Las salidas quedan en `output/<nombre_imagen>/1/`:
 
-| Carpeta | Archivo | Contenido |
-|---|---|---|
-| `masks_3d/` | `<nombre>_masks_3d.tif` | Máscara 3D etiquetada (0 = fondo, 1..N = células) |
-| `measurements/` | `<nombre>_measurements_3d.csv` | Una fila por célula con métricas morfológicas 3D |
-| `projections/` | `<nombre>_max_projection.tif` | Proyección de intensidad máxima |
-| `projections/` | `<nombre>_mask_projection.tif` | Proyección máxima de la máscara |
-| `meshes/` | `<nombre>_cell_<id>.obj` | Malla 3D por célula (si `save_individual_cell_meshes: true`) |
-| `figures_qc/` | `<nombre>_qc_overlay.png` | 3 paneles: original / máscara / overlay |
+| Carpeta         | Archivo                        | Contenido                                                    |
+| --------------- | ------------------------------ | ------------------------------------------------------------ |
+| `masks_3d/`     | `<nombre>_masks_3d.tif`        | Máscara 3D etiquetada (0 = fondo, 1..N = células)            |
+| `measurements/` | `<nombre>_measurements_3d.csv` | Una fila por célula con métricas morfológicas 3D             |
+| `projections/`  | `<nombre>_max_projection.tif`  | Proyección de intensidad máxima                              |
+| `projections/`  | `<nombre>_mask_projection.tif` | Proyección máxima de la máscara                              |
+| `meshes/`       | `<nombre>_cell_<id>.obj`       | Malla 3D por célula (si `save_individual_cell_meshes: true`) |
+| `figures_qc/`   | `<nombre>_qc_overlay.png`      | 3 paneles: original / máscara / overlay                      |
 
 **Columnas del CSV (`_measurements_3d.csv`):**
 
@@ -216,11 +216,11 @@ El script descubre automáticamente todas las subcarpetas de `output/` que conte
 
 Hay tres modos de umbral, en orden de prioridad:
 
-| Modo | Argumento | Comportamiento |
-|---|---|---|
-| **Otsu** (default) | _(ninguno)_ | Valle natural del histograma de `mean_intensity_red` |
-| **Factor SD** | `--factor k` | `mean - k × SD` de `mean_intensity_red` |
-| **Valor fijo** | `--threshold T` | Valor fijo en unidades raw del detector (0–65535) |
+| Modo               | Argumento       | Comportamiento                                       |
+| ------------------ | --------------- | ---------------------------------------------------- |
+| **Otsu** (default) | _(ninguno)_     | Valle natural del histograma de `mean_intensity_red` |
+| **Factor SD**      | `--factor k`    | `mean - k × SD` de `mean_intensity_red`              |
+| **Valor fijo**     | `--threshold T` | Valor fijo en unidades raw del detector (0–65535)    |
 
 Ejemplo con factor personalizado:
 
@@ -230,12 +230,12 @@ Ejemplo con factor personalizado:
 
 Guía de ajuste del `--factor`:
 
-| `--factor` | Efecto |
-|---|---|
-| `0.5` | Umbral alto — más células clasificadas como negativas |
-| `1.0` | Umbral moderado — punto de partida recomendado |
-| `1.6` | Default — umbral más bajo, pocas negativas |
-| `2.0` | Umbral muy bajo — solo las más tenues quedan como negativas |
+| `--factor` | Efecto                                                      |
+| ---------- | ----------------------------------------------------------- |
+| `0.5`      | Umbral alto — más células clasificadas como negativas       |
+| `1.0`      | Umbral moderado — punto de partida recomendado              |
+| `1.6`      | Default — umbral más bajo, pocas negativas                  |
+| `2.0`      | Umbral muy bajo — solo las más tenues quedan como negativas |
 
 **Flujo recomendado:** corre con `--factor 1.0`, abre `*_dbc1_classification.png`
 y compara el panel de clasificación (verde = Dbc1+, rojo = Dbc1−) contra el
@@ -260,13 +260,13 @@ por debajo de ese valor.
 
 Las salidas quedan en `output/<nombre_imagen>/2/`:
 
-| Carpeta | Archivo | Contenido |
-|---|---|---|
-| `measurements/` | `<nombre>_dbc1_intensity.csv` | Intensidad por célula + clasificación |
-| `masks_3d/` | `<nombre>_masks_dbc1_positive.tif` | Máscara original con labels Dbc1− puestos a 0 |
-| `figures_qc/` | `<nombre>_dbc1_classification.png` | 3 paneles: canal rojo / clasificación / overlay |
-| `figures_qc/` | `<nombre>_qc_red_overlay.png` | Overlay canal rojo con todas las máscaras |
-| `figures_qc/` | `<nombre>_qc_blue_overlay.png` | Overlay canal azul (DAPI) con todas las máscaras |
+| Carpeta         | Archivo                            | Contenido                                        |
+| --------------- | ---------------------------------- | ------------------------------------------------ |
+| `measurements/` | `<nombre>_dbc1_intensity.csv`      | Intensidad por célula + clasificación            |
+| `masks_3d/`     | `<nombre>_masks_dbc1_positive.tif` | Máscara original con labels Dbc1− puestos a 0    |
+| `figures_qc/`   | `<nombre>_dbc1_classification.png` | 3 paneles: canal rojo / clasificación / overlay  |
+| `figures_qc/`   | `<nombre>_qc_red_overlay.png`      | Overlay canal rojo con todas las máscaras        |
+| `figures_qc/`   | `<nombre>_qc_blue_overlay.png`     | Overlay canal azul (DAPI) con todas las máscaras |
 
 **Columnas del CSV (`_dbc1_intensity.csv`):**
 
@@ -287,25 +287,25 @@ Las salidas quedan en `output/<nombre_imagen>/2/`:
 
 Sea `V` el conjunto de voxeles de la célula en la máscara `(Z, Y, X)`:
 
-| Columna | Fórmula |
-|---|---|
-| `voxel_count` | `\|V\|` |
-| `volume_um3` | `\|V\| × px_xy² × px_z` |
-| `projected_area_xy_um2` | Píxeles únicos en proyección XY × `px_xy²` |
-| `z_slices_detected` | Cortes Z con al menos un voxel de la célula |
-| `surface_area_um2` | Área de la malla triangular (*marching cubes*, `spacing = (px_z, px_xy, px_xy)`) |
+| Columna                 | Fórmula                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| `voxel_count`           | `\|V\|`                                                                          |
+| `volume_um3`            | `\|V\| × px_xy² × px_z`                                                          |
+| `projected_area_xy_um2` | Píxeles únicos en proyección XY × `px_xy²`                                       |
+| `z_slices_detected`     | Cortes Z con al menos un voxel de la célula                                      |
+| `surface_area_um2`      | Área de la malla triangular (*marching cubes*, `spacing = (px_z, px_xy, px_xy)`) |
 
 ### Fase 2 — Intensidad
 
-| Columna | Fórmula |
-|---|---|
-| `mean_intensity_red` | Media de `red_proj` sobre los píxeles de la célula |
-| `bkg_pp` | Media de `red_proj` sobre píxeles fuera de todas las máscaras |
-| `mean_intensity_corr` | `mean_intensity_red − bkg_pp` |
-| `IntDen` | `area_px × mean_intensity_red` |
-| `IntDen_corregida` | `IntDen − PromIntDen_BKG` |
-| `IntDen_3D` | Suma de `red_volume` sobre todos los voxeles de la célula |
-| `IntDen_3D_corr` | `IntDen_3D − bkg_pp_3d × voxel_count_3d` |
+| Columna               | Fórmula                                                       |
+| --------------------- | ------------------------------------------------------------- |
+| `mean_intensity_red`  | Media de `red_proj` sobre los píxeles de la célula            |
+| `bkg_pp`              | Media de `red_proj` sobre píxeles fuera de todas las máscaras |
+| `mean_intensity_corr` | `mean_intensity_red − bkg_pp`                                 |
+| `IntDen`              | `area_px × mean_intensity_red`                                |
+| `IntDen_corregida`    | `IntDen − PromIntDen_BKG`                                     |
+| `IntDen_3D`           | Suma de `red_volume` sobre todos los voxeles de la célula     |
+| `IntDen_3D_corr`      | `IntDen_3D − bkg_pp_3d × voxel_count_3d`                      |
 
 ---
 
