@@ -11,94 +11,65 @@ Pipeline en Python que segmenta células en 3D con **Cellpose** (`do_3D=True`), 
 - Python 3.9 o superior instalado y en el PATH.
 - El proyecto clonado o descargado en tu máquina.
 
-### Crear y activar el entorno virtual
+### Instalar
 
-Ejecuta los siguientes comandos desde la carpeta raíz del proyecto (`cell_3d_analysis/`):
+El script `setup.ps1` hace todo el proceso en un solo paso: crea el entorno
+virtual, detecta si tienes una GPU NVIDIA y, si la hay, instala el build de
+PyTorch con soporte CUDA correcto (incluyendo GPUs Blackwell como la serie
+RTX 50xx) antes de instalar el resto de dependencias.
 
-**Windows (PowerShell)**
+Desde la carpeta raíz del proyecto (`cell_3d_analysis/`):
 
 ```powershell
-# Solo la primera vez
-python -m venv venv
+# Si PowerShell bloquea la ejecución de scripts, primero:
+# Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
-# Cada vez que abras una terminal nueva
-.\venv\Scripts\Activate.ps1
+.\setup.ps1
 ```
 
-> Si PowerShell bloquea la activación, ejecuta primero:
-> `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`
+Al terminar, verás impreso si CUDA está disponible y el nombre de la GPU
+detectada. Activa el entorno en cada sesión nueva con:
 
-**macOS / Linux (bash)**
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
+```powershell
+.\venv\Scripts\Activate.ps1
 ```
 
 Cuando el entorno está activo verás `(venv)` al inicio del prompt.
 
-### Instalar dependencias
-
-Con el entorno activado:
-
-```bash
-pip install -r requirements.txt
-```
-
-Para trabajar con archivos `.czi` de Zeiss (Fase 1B y Fase 2):
-
-```bash
-pip install czifile
-```
-
-> **GPU (opcional):** `requirements.txt` instala la versión CPU de PyTorch.
-> Para usar GPU, instala primero el build de torch con CUDA para tu tarjeta
-> desde https://pytorch.org/get-started/locally/ y luego instala el resto
-> de dependencias.
+> El driver de NVIDIA **no** se instala automáticamente (requiere permisos de
+> administrador y normalmente un reinicio). Si `setup.ps1` reporta que CUDA
+> no está disponible pese a tener una GPU NVIDIA, instala/actualiza el driver
+> desde https://www.nvidia.com/drivers y vuelve a correr `.\setup.ps1`.
 
 ---
 
 ## 2. Preparar los datos de entrada
 
-### Estructura de carpetas
+Para Fase 1 solo necesitas el archivo `.czi` original — no hace falta copiarlo
+al proyecto ni llenar `metadata.csv`. El pipeline:
 
-```
-cell_3d_analysis/
-├── input/
-│   ├── raw_zstacks/        # coloca aquí tus .tif/.tiff
-│   └── metadata/
-│       └── metadata.csv    # una fila por imagen
-├── config/
-│   └── config.yaml         # parámetros del pipeline
-└── output/                 # se genera automáticamente
-```
+- Extrae el canal indicado del `.czi`.
+- Lee `px_xy_um` y `px_z_um` directamente del encabezado.
+- Genera las salidas en `output/<nombre_czi>/1/`.
 
-### metadata.csv
+> **Nota sobre las imágenes `cre+342_17`:** el `.czi` es `C × Z × Y × X = 2 × 6 × 1024 × 1024`.
+> Canal 0 = AF647 (señal a medir), canal 1 = DAPI (núcleos a segmentar).
+> Calibración extraída automáticamente: `px_xy = 0.099 µm`, `px_z = 2.0 µm`.
 
-Una fila por imagen. Columnas mínimas obligatorias:
+> ¿Prefieres convertir el `.czi` a TIFF y trabajar con `metadata.csv` a mano?
+> Consulta el [Apéndice: procesamiento manual desde TIFF](#apéndice-procesamiento-manual-desde-tiff-y-metadatacsv)
+> al final de este documento.
 
-| Columna              | Tipo   | Significado                                |
-| -------------------- | ------ | ------------------------------------------ |
-| `filename`           | texto  | Nombre del archivo en `input/raw_zstacks/` |
-| `px_xy_um`           | float  | Tamaño de pixel lateral en µm              |
-| `px_z_um`            | float  | Distancia entre cortes Z en µm             |
-| `channel_to_segment` | entero | Canal a segmentar (0 si es grayscale)      |
-| `notes`              | texto  | Comentario libre (opcional)                |
+---
 
-```csv
-filename,px_xy_um,px_z_um,channel_to_segment,notes
-muestra1.tif,0.099,2.0,1,nucleo DAPI
-muestra2.tif,0.108,0.300,0,control
-```
+## 3. Fase 1 — Segmentación 3D
 
-### Opción A: procesar un .czi directamente
+### Ejecutar
 
-Para Fase 1 puedes partir del archivo `.czi` sin convertirlo antes a TIFF. El
-pipeline extrae el canal indicado, lee la calibración física del encabezado y
-genera las salidas en la misma estructura que el flujo TIFF:
+Desde la raíz del proyecto, con el entorno activado, apunta directo al `.czi`:
 
 ```powershell
-.\venv\Scripts\python.exe src/main.py --config config/config.yaml --czi "C:\ruta\a\imagen.czi" --channel 1
+.\venv\Scripts\python.exe src/main.py --czi "C:\ruta\a\imagen.czi" --channel 1
 ```
 
 Antes de procesar, el programa imprime un resumen para confirmar:
@@ -116,7 +87,7 @@ Opciones de ejecución:
 
 | Opción | Uso |
 | ------ | --- |
-| `--czi "C:\ruta\a\imagen.czi"` | Procesa ese `.czi` directamente, sin leer `metadata.csv` para la imagen. |
+| `--czi "C:\ruta\a\imagen.czi"` | Procesa ese `.czi` directamente, sin leer `metadata.csv`. |
 | `--channel 0` | Canal a extraer y segmentar. Default: `0`. |
 | `--yes` o `-y` | Omite la confirmación interactiva. Útil para scripts o CI. |
 | `--config config/config.yaml` | Mantiene los parámetros de segmentación, medición, QC y `output_dir`. |
@@ -137,52 +108,6 @@ Ejemplos:
 Si el `.czi` no tiene calibración legible, el resumen muestra `NO detectada` y
 el log registra una advertencia. El procesamiento requiere `px_xy_um` y
 `px_z_um`; si alguno queda sin detectar, Fase 1 falla con un error de calibración.
-
-### Opción B: convertir archivos .czi a TIFF
-
-También puedes usar el conversor incluido para generar un TIFF y actualizar
-`metadata.csv`. Este flujo es útil si quieres inspeccionar o reutilizar el TIFF
-antes de correr el pipeline:
-
-```powershell
-# Convierte el canal 1 (DAPI) y agrega la fila a metadata.csv automáticamente
-.\venv\Scripts\python.exe tools/czi_to_tiff.py "C:\ruta\a\imagen.czi" --channel 1 --append-metadata
-```
-
-El conversor:
-- Extrae el canal indicado y guarda el TIFF en `input/raw_zstacks/`.
-- Lee `px_xy_um` y `px_z_um` del `.czi` e imprime sus valores.
-- Con `--append-metadata`, los escribe directamente en `metadata.csv`.
-
-> **Nota sobre tus imágenes `cre+342_17`:** el `.czi` es `C × Z × Y × X = 2 × 6 × 1024 × 1024`.
-> Canal 0 = AF647 (señal a medir), canal 1 = DAPI (núcleos a segmentar).
-> Calibración extraída automáticamente: `px_xy = 0.099 µm`, `px_z = 2.0 µm`.
-
----
-
-## 3. Fase 1 — Segmentación 3D
-
-### Ejecutar
-
-Desde la raíz del proyecto, con el entorno activado:
-
-```powershell
-.\venv\Scripts\python.exe src/main.py --config config/config.yaml
-```
-
-Ese comando procesa todas las imágenes listadas en `metadata.csv`.
-
-Para procesar un `.czi` directo en un solo paso:
-
-```powershell
-.\venv\Scripts\python.exe src/main.py --czi "C:\ruta\a\imagen.czi" --channel 1
-```
-
-Para correrlo sin prompt de confirmación:
-
-```powershell
-.\venv\Scripts\python.exe src/main.py --czi "C:\ruta\a\imagen.czi" --channel 1 --yes
-```
 
 ### Parametrizar
 
@@ -386,3 +311,64 @@ Una sola imagen 2D no permite reconstrucción 3D real.
 
 **Log:** cada corrida genera `output/logs/pipeline_log.txt` con el registro
 completo de la ejecución.
+
+---
+
+## Apéndice: procesamiento manual desde TIFF y metadata.csv
+
+Si prefieres convertir tus `.czi` a TIFF antes de correr el pipeline (por
+ejemplo, para inspeccionar o reutilizar el TIFF), sigue este flujo manual.
+
+### Estructura de carpetas
+
+```
+cell_3d_analysis/
+├── input/
+│   ├── raw_zstacks/        # coloca aquí tus .tif/.tiff
+│   └── metadata/
+│       └── metadata.csv    # una fila por imagen
+├── config/
+│   └── config.yaml         # parámetros del pipeline
+└── output/                 # se genera automáticamente
+```
+
+### metadata.csv
+
+Una fila por imagen. Columnas mínimas obligatorias:
+
+| Columna              | Tipo   | Significado                                |
+| -------------------- | ------ | ------------------------------------------ |
+| `filename`           | texto  | Nombre del archivo en `input/raw_zstacks/` |
+| `px_xy_um`           | float  | Tamaño de pixel lateral en µm              |
+| `px_z_um`            | float  | Distancia entre cortes Z en µm             |
+| `channel_to_segment` | entero | Canal a segmentar (0 si es grayscale)      |
+| `notes`              | texto  | Comentario libre (opcional)                |
+
+```csv
+filename,px_xy_um,px_z_um,channel_to_segment,notes
+muestra1.tif,0.099,2.0,1,nucleo DAPI
+muestra2.tif,0.108,0.300,0,control
+```
+
+### Convertir un .czi a TIFF
+
+Usa el conversor incluido para generar el TIFF y agregar su fila a `metadata.csv`:
+
+```powershell
+# Convierte el canal 1 (DAPI) y agrega la fila a metadata.csv automáticamente
+.\venv\Scripts\python.exe tools/czi_to_tiff.py "C:\ruta\a\imagen.czi" --channel 1 --append-metadata
+```
+
+El conversor:
+- Extrae el canal indicado y guarda el TIFF en `input/raw_zstacks/`.
+- Lee `px_xy_um` y `px_z_um` del `.czi` e imprime sus valores.
+- Con `--append-metadata`, los escribe directamente en `metadata.csv`.
+
+### Ejecutar Fase 1 desde metadata.csv
+
+Con el TIFF ya en `input/raw_zstacks/` y su fila en `metadata.csv`, procesa
+todas las imágenes listadas:
+
+```powershell
+.\venv\Scripts\python.exe src/main.py --config config/config.yaml
+```
