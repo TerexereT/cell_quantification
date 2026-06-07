@@ -87,3 +87,39 @@ def test_build_phase1_config_rejects_bad_numeric_value():
                 "gpu": "auto",
             },
         )
+
+
+def test_load_formula_sections_splits_phase_content(tmp_path):
+    doc = tmp_path / "calculos_justificacion.md"
+    doc.write_text(
+        "## Fase 1\nformula volumen\n\n## Fase 2\nformula intensidad\n",
+        encoding="utf-8",
+    )
+
+    sections = app._load_formula_sections(doc)
+
+    assert sections["phase1"] == "formula volumen"
+    assert sections["phase2"] == "formula intensidad"
+
+
+def test_load_formula_sections_reports_missing_heading(tmp_path):
+    doc = tmp_path / "calculos_justificacion.md"
+    doc.write_text("## Fase 1\nsolo una fase\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="## Fase 2"):
+        app._load_formula_sections(doc)
+
+
+def test_load_formula_sections_reports_missing_file(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        app._load_formula_sections(tmp_path / "no_existe.md")
+
+
+def test_field_help_covers_declared_ui_fields():
+    keys = [key for _label, key in app.PHASE1_FIELDS + app.PHASE2_FIELDS]
+
+    assert keys
+    for key in keys:
+        assert key in app.FIELD_HELP
+        assert isinstance(app.FIELD_HELP[key], str)
+        assert app.FIELD_HELP[key].strip()

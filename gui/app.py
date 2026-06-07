@@ -38,10 +38,112 @@ import phase2_intensity  # noqa: E402
 from utils import setup_logger, stem  # noqa: E402
 
 CONFIG_PATH = ROOT / "config" / "config.yaml"
+FORMULA_DOC_PATH = ROOT / "docs" / "calculos_justificacion.md"
+
+PHASE1_FIELDS = (
+    ("diameter", "diameter"),
+    ("flow_threshold", "flow_threshold"),
+    ("cellprob_threshold", "cellprob_threshold"),
+    ("min_size_voxels", "min_size_voxels"),
+    ("gpu", "gpu"),
+)
+PHASE2_FIELDS = (
+    ("modo umbral", "threshold_mode"),
+    ("factor", "factor"),
+    ("threshold", "threshold"),
+    ("red_channel", "red_channel"),
+    ("blue_channel", "blue_channel"),
+)
+
+FIELD_HELP = {
+    "diameter": (
+        "Diametro esperado del nucleo en pixeles. Usa null para autodeteccion; "
+        "si las mascaras salen sub/sobredimensionadas, mide varios nucleos en Fiji "
+        "y fija el promedio en pixeles."
+    ),
+    "flow_threshold": (
+        "Controla la separacion de objetos pegados. Bajarlo ayuda a separar nucleos "
+        "unidos; subirlo ayuda cuando un nucleo aparece partido en varios fragmentos."
+    ),
+    "cellprob_threshold": (
+        "Controla cuan tenue puede ser una celula para ser detectada. Bajarlo detecta "
+        "nucleos tenues; subirlo reduce detecciones de fondo."
+    ),
+    "min_size_voxels": (
+        "Descarta objetos menores que este volumen en voxeles. Subelo si aparecen "
+        "muchas manchitas espurias en el overlay de control de calidad."
+    ),
+    "gpu": (
+        "Define si Cellpose usa GPU. 'auto' intenta usar CUDA si esta disponible, "
+        "'true' fuerza GPU y 'false' ejecuta en CPU."
+    ),
+    "threshold_mode": (
+        "Modo de umbral para clasificar Dbc1. Otsu usa el valle del histograma, "
+        "factor usa mean - k x SD y fixed usa un valor raw fijo."
+    ),
+    "factor": (
+        "Factor k para el modo factor. Valores bajos como 0.5 suben el umbral y "
+        "generan mas negativas; valores altos como 1.6 o 2.0 bajan el umbral."
+    ),
+    "threshold": (
+        "Valor fijo de intensidad raw usado solo con modo fixed. Debe estar en la "
+        "escala del detector, por ejemplo 0-65535 para imagenes de 16 bits."
+    ),
+    "red_channel": (
+        "Indice del canal rojo/AF647 donde se mide la senal Dbc1. Debe coincidir "
+        "con el canal de intensidad del archivo CZI."
+    ),
+    "blue_channel": (
+        "Indice del canal azul/DAPI usado para overlays de control. Debe coincidir "
+        "con el canal nuclear del archivo CZI."
+    ),
+}
 
 
 def load_gui_defaults(config_path=CONFIG_PATH):
     return io_utils.load_config(str(config_path))
+
+
+def _load_formula_sections(path=FORMULA_DOC_PATH):
+    text = Path(path).read_text(encoding="utf-8")
+    marker1 = "## Fase 1"
+    marker2 = "## Fase 2"
+    start1 = text.find(marker1)
+    start2 = text.find(marker2)
+    missing = []
+    if start1 == -1:
+        missing.append(marker1)
+    if start2 == -1:
+        missing.append(marker2)
+    if missing:
+        raise ValueError(
+            "Falta la seccion de justificacion: " + ", ".join(missing)
+        )
+    if start2 < start1:
+        raise ValueError("La seccion ## Fase 2 debe aparecer despues de ## Fase 1.")
+
+    phase1 = text[start1 + len(marker1):start2].strip()
+    next_heading = text.find("\n## ", start2 + len(marker2))
+    end2 = next_heading if next_heading != -1 else len(text)
+    phase2 = text[start2 + len(marker2):end2].strip()
+    return {"phase1": phase1, "phase2": phase2}
+
+
+def _show_help_popup(parent, title, text):
+    popup = tk.Toplevel(parent)
+    popup.title(title)
+    popup.transient(parent)
+    popup.resizable(False, False)
+    ttk.Label(popup, text=title, font=("TkDefaultFont", 10, "bold")).grid(
+        row=0, column=0, sticky="w", padx=12, pady=(12, 4)
+    )
+    ttk.Label(popup, text=text, wraplength=420, justify="left").grid(
+        row=1, column=0, sticky="ew", padx=12
+    )
+    ttk.Button(popup, text="Cerrar", command=popup.destroy).grid(
+        row=2, column=0, sticky="e", padx=12, pady=12
+    )
+    popup.grab_set()
 
 
 def _parse_optional_float(value, field_name):
@@ -164,33 +266,61 @@ class Cell3DApp:
         ttk.Label(frame, text="Canal segmentacion").grid(row=1, column=0, sticky="w")
         ttk.Spinbox(frame, from_=0, to=20, textvariable=self.channel_var, width=8).grid(row=1, column=1, sticky="w")
 
-        phase1 = ttk.LabelFrame(frame, text="Fase 1 - Segmentacion", padding=8)
+        phase1 = ttk.LabelFrame(
+            frame, text="Fase 1 — Segmentación 3D de núcleos celulares", padding=8
+        )
         phase1.grid(row=2, column=0, columnspan=3, sticky="ew", pady=6)
-        for idx, (label, var) in enumerate([
-            ("diameter", self.diameter_var),
-            ("flow_threshold", self.flow_var),
-            ("cellprob_threshold", self.cellprob_var),
-            ("min_size_voxels", self.min_size_var),
-        ]):
+        phase1.columnconfigure(1, weight=1)
+        phase1_vars = {
+            "diameter": self.diameter_var,
+            "flow_threshold": self.flow_var,
+            "cellprob_threshold": self.cellprob_var,
+            "min_size_voxels": self.min_size_var,
+        }
+        for idx, (label, key) in enumerate(PHASE1_FIELDS[:-1]):
             ttk.Label(phase1, text=label).grid(row=idx, column=0, sticky="w")
-            ttk.Entry(phase1, textvariable=var, width=16).grid(row=idx, column=1, sticky="w")
+            ttk.Entry(phase1, textvariable=phase1_vars[key], width=16).grid(row=idx, column=1, sticky="w")
+            self._help_button(phase1, idx, key, label)
         ttk.Label(phase1, text="gpu").grid(row=4, column=0, sticky="w")
         ttk.Combobox(phase1, textvariable=self.gpu_var, values=("auto", "true", "false"), width=13, state="readonly").grid(row=4, column=1, sticky="w")
+        self._help_button(phase1, 4, "gpu", "gpu")
+        ttk.Button(
+            phase1,
+            text="Ver justificación de cálculos",
+            command=lambda: self._show_formula_section(
+                "phase1", "Justificación de cálculos - Fase 1"
+            ),
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
-        phase2 = ttk.LabelFrame(frame, text="Fase 2 - Clasificacion Dbc1", padding=8)
+        phase2 = ttk.LabelFrame(
+            frame, text="Fase 2 — Medición de intensidad y clasificación Dbc1+/−", padding=8
+        )
         phase2.grid(row=3, column=0, columnspan=3, sticky="ew", pady=6)
-        for idx, (label, var, values) in enumerate([
-            ("modo umbral", self.threshold_mode_var, ("otsu", "factor", "fixed")),
-            ("factor", self.factor_var, None),
-            ("threshold", self.threshold_var, None),
-            ("red_channel", self.red_var, None),
-            ("blue_channel", self.blue_var, None),
-        ]):
+        phase2.columnconfigure(1, weight=1)
+        phase2_vars = {
+            "threshold_mode": self.threshold_mode_var,
+            "factor": self.factor_var,
+            "threshold": self.threshold_var,
+            "red_channel": self.red_var,
+            "blue_channel": self.blue_var,
+        }
+        phase2_values = {"threshold_mode": ("otsu", "factor", "fixed")}
+        for idx, (label, key) in enumerate(PHASE2_FIELDS):
             ttk.Label(phase2, text=label).grid(row=idx, column=0, sticky="w")
+            var = phase2_vars[key]
+            values = phase2_values.get(key)
             if values:
                 ttk.Combobox(phase2, textvariable=var, values=values, width=13, state="readonly").grid(row=idx, column=1, sticky="w")
             else:
                 ttk.Entry(phase2, textvariable=var, width=16).grid(row=idx, column=1, sticky="w")
+            self._help_button(phase2, idx, key, label)
+        ttk.Button(
+            phase2,
+            text="Ver justificación de cálculos",
+            command=lambda: self._show_formula_section(
+                "phase2", "Justificación de cálculos - Fase 2"
+            ),
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         self._file_row(frame, 4, "Salida", self.output_var, self._pick_output)
         ttk.Label(frame, textvariable=self.preview_var).grid(row=5, column=0, columnspan=3, sticky="w")
@@ -215,6 +345,38 @@ class Cell3DApp:
         entry.grid(row=row, column=1, sticky="ew", padx=4)
         entry.bind("<KeyRelease>", lambda _event: self._update_preview())
         ttk.Button(frame, text="...", width=3, command=command).grid(row=row, column=2)
+
+    def _help_button(self, frame, row, key, title):
+        ttk.Button(
+            frame,
+            text="?",
+            width=2,
+            command=lambda: _show_help_popup(self.root, title, FIELD_HELP[key]),
+        ).grid(row=row, column=2, sticky="w", padx=(6, 0))
+
+    def _show_formula_section(self, section_key, title):
+        try:
+            sections = _load_formula_sections(FORMULA_DOC_PATH)
+        except (OSError, ValueError) as exc:
+            messagebox.showwarning(
+                "Justificación no disponible",
+                f"No se pudo cargar la justificación de cálculos:\n{exc}",
+            )
+            return
+
+        popup = tk.Toplevel(self.root)
+        popup.title(title)
+        popup.transient(self.root)
+        popup.geometry("760x420")
+        text = scrolledtext.ScrolledText(popup, wrap="word", width=90, height=22)
+        text.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        popup.columnconfigure(0, weight=1)
+        popup.rowconfigure(0, weight=1)
+        text.insert("1.0", sections[section_key])
+        text.configure(state="disabled")
+        ttk.Button(popup, text="Cerrar", command=popup.destroy).grid(
+            row=1, column=0, sticky="e", padx=10, pady=(0, 10)
+        )
 
     def _pick_czi(self):
         path = filedialog.askopenfilename(filetypes=[("CZI", "*.czi"), ("Todos", "*.*")])
