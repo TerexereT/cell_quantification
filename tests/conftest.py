@@ -12,8 +12,12 @@ import types
 import numpy as np
 import pytest
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 # Agrega src/ al path de importación.
-SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 

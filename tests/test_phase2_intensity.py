@@ -14,7 +14,7 @@ import phase2_intensity  # noqa: E402
 
 
 def _write_mask_run(output_dir, run_name, stem, shape=(2, 4, 5)):
-    run_dir = output_dir / run_name
+    run_dir = output_dir / run_name / "1"
     masks_dir = run_dir / "masks_3d"
     masks_dir.mkdir(parents=True)
     mask = np.zeros(shape, dtype=np.uint16)
@@ -43,13 +43,17 @@ def test_process_output_generates_outputs_for_two_folders(tmp_path, monkeypatch)
     red[:, 0:2, 1:5] = 100
     red[:, 1, 0] = 100
     blue = np.ones((2, 4, 5), dtype=np.float32)
-    monkeypatch.setattr(phase2_intensity, "load_czi_dual_channel", lambda _p: (red, blue))
+    monkeypatch.setattr(
+        phase2_intensity,
+        "load_czi_dual_channel",
+        lambda _p, red_channel=0, blue_channel=1: (red, blue),
+    )
 
     summaries = phase2_intensity.process_output("fake.czi", output_dir)
 
     assert len(summaries) == 2
     for run_name in ["voxels1500", "voxels2000"]:
-        run_dir = output_dir / run_name
+        run_dir = output_dir / run_name / "2"
         assert (run_dir / "figures_qc" / "sample_qc_blue_overlay.png").is_file()
         assert (run_dir / "figures_qc" / "sample_qc_red_overlay.png").is_file()
         assert (run_dir / "figures_qc" / "sample_dbc1_classification.png").is_file()
@@ -66,19 +70,23 @@ def test_classification_marks_visibly_low_cell_as_negative(tmp_path, monkeypatch
     red[:, 0:2, 1:5] = 100
     red[:, 1, 0] = 100
     blue = np.ones((2, 4, 5), dtype=np.float32)
-    monkeypatch.setattr(phase2_intensity, "load_czi_dual_channel", lambda _p: (red, blue))
+    monkeypatch.setattr(
+        phase2_intensity,
+        "load_czi_dual_channel",
+        lambda _p, red_channel=0, blue_channel=1: (red, blue),
+    )
 
     summaries = phase2_intensity.process_output("fake.czi", output_dir)
 
     assert summaries[0]["n_negative"] == 1
-    rows = _read_csv_rows(output_dir / "voxels1500" / "measurements" / "sample_dbc1_intensity.csv")
+    rows = _read_csv_rows(output_dir / "voxels1500" / "2" / "measurements" / "sample_dbc1_intensity.csv")
     cell_rows = [row for row in rows if row["cell_id"] != "__metadata__"]
     assert cell_rows[0]["clasificacion"] == phase2_intensity.NEGATIVE_LABEL
     assert all(row["clasificacion"] == phase2_intensity.POSITIVE_LABEL for row in cell_rows[1:])
 
     original = tifffile.imread(str(mask_path))
     filtered = tifffile.imread(
-        str(output_dir / "voxels1500" / "masks_3d" / "sample_masks_dbc1_positive.tif")
+        str(output_dir / "voxels1500" / "2" / "masks_3d" / "sample_masks_dbc1_positive.tif")
     )
     assert np.unique(filtered[filtered != 0]).size < np.unique(original[original != 0]).size
     assert 1 not in np.unique(filtered)
@@ -96,7 +104,10 @@ def test_no_masks_returns_empty_summary(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         phase2_intensity,
         "load_czi_dual_channel",
-        lambda _p: (np.zeros((1, 2, 2)), np.zeros((1, 2, 2))),
+        lambda _p, red_channel=0, blue_channel=1: (
+            np.zeros((1, 2, 2)),
+            np.zeros((1, 2, 2)),
+        ),
     )
 
     summaries = phase2_intensity.process_output("fake.czi", output_dir)
@@ -111,11 +122,60 @@ def test_uniform_cells_have_sd_zero_and_all_positive():
     mask_proj[0, 0] = 1
     mask_proj[1, 1] = 2
 
-    rows, metadata = phase2_intensity.measure_intensity(red_proj, mask_proj)
+    red_volume = np.stack([red_proj])
+    mask_3d = np.stack([mask_proj])
 
-    assert metadata["SD"] == pytest.approx(0)
-    assert metadata["umbral"] == pytest.approx(metadata["media"])
+    rows, metadata = phase2_intensity.measure_intensity(
+        red_proj, mask_proj, red_volume, mask_3d, threshold_factor=1.0
+    )
+
+    assert metadata["umbral"] == pytest.approx(10)
     assert [row["clasificacion"] for row in rows] == [
         phase2_intensity.POSITIVE_LABEL,
         phase2_intensity.POSITIVE_LABEL,
     ]
+
+
+def test_process_output_progress_callback_is_called(tmp_path, monkeypatch):
+    output_dir = tmp_path / "output"
+    _write_mask_run(output_dir, "voxels1500", "sample")
+    red = np.ones((2, 4, 5), dtype=np.float32)
+    blue = np.ones((2, 4, 5), dtype=np.float32)
+    monkeypatch.setattr(
+        phase2_intensity,
+        "load_czi_dual_channel",
+        lambda _p, red_channel=0, blue_channel=1: (red, blue),
+    )
+    messages = []
+
+    summaries = phase2_intensity.process_output(
+        "fake.czi", output_dir, progress_callback=messages.append
+    )
+
+    assert len(summaries) == 1
+    joined = "\n".join(messages)
+    assert "Cargando CZI" in joined
+    assert "calculando intensidades" in joined
+    assert "generando figura" in joined
+
+
+def test_load_phase2_config_and_cli_threshold_priority(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "phase2:\n"
+        "  threshold_mode: factor\n"
+        "  factor: 1.4\n"
+        "  threshold: null\n"
+        "  red_channel: 2\n"
+        "  blue_channel: 3\n",
+        encoding="utf-8",
+    )
+
+    defaults = phase2_intensity.load_phase2_config(str(config))
+    factor, threshold = phase2_intensity.resolve_threshold_settings(
+        defaults, cli_threshold=500
+    )
+
+    assert defaults["red_channel"] == 2
+    assert factor is None
+    assert threshold == 500

@@ -641,3 +641,31 @@ def test_main_zero_cells_warns(tmp_path, fake_cellpose):
     assert len(df) == 0  # CSV con cabecera pero sin filas
     log = (tmp_path / "output" / "logs" / "pipeline_log.txt").read_text(encoding="utf-8")
     assert "0 células" in log
+
+
+def test_process_image_progress_callback_reports_key_steps(tmp_path, fake_cellpose):
+    import main
+
+    mask = np.zeros((6, 16, 16), dtype=np.uint16)
+    mask[1:4, 4:10, 4:10] = 1
+    fake_cellpose.return_mask = mask
+    cfg_path = _write_project(tmp_path, mask)
+    config = io_utils.load_config(str(cfg_path))
+    logger = main.setup_logger(str(tmp_path / "progress.log"))
+    row = {
+        "filename": "ejemplo_zstack.tif",
+        "px_xy_um": 0.108,
+        "px_z_um": 0.300,
+        "channel_to_segment": 0,
+    }
+    messages = []
+
+    n_cells = main.process_image(row, config, logger, progress_callback=messages.append)
+
+    assert n_cells == 1
+    joined = "\n".join(messages)
+    assert "cargado" in joined
+    assert "segmentación 3D completada" in joined
+    assert "máscara guardada" in joined
+    assert "mediciones guardadas" in joined
+    assert "figuras QC" in joined

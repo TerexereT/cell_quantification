@@ -23,6 +23,16 @@ cellpose:
   min_size_voxels: 2000 # Objetos con menos voxeles que esto se descartan (filtro 3D)
 
 # ------------------------------------------------------------
+# Parámetros de Fase 2: clasificación Dbc1 por intensidad
+# ------------------------------------------------------------
+phase2:
+  threshold_mode: "otsu" # otsu = automático; factor = media - k*SD; fixed = valor fijo
+  factor: 1.6 # k usado cuando threshold_mode: "factor"
+  threshold: null # Valor fijo usado cuando threshold_mode: "fixed"; null = sin valor fijo
+  red_channel: 0 # Canal rojo/AF647/Dbc1 dentro del CZI (0-based)
+  blue_channel: 1 # Canal azul/DAPI dentro del CZI (0-based)
+
+# ------------------------------------------------------------
 # Mediciones por célula
 # ------------------------------------------------------------
 measurements:

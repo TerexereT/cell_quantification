@@ -72,7 +72,13 @@ def _is_missing(value):
     return value is None or (isinstance(value, float) and np.isnan(value))
 
 
-def process_image(row, config, logger, volume=None):
+def _report_progress(logger, progress_callback, message, level="info"):
+    getattr(logger, level)(message)
+    if progress_callback is not None:
+        progress_callback(message)
+
+
+def process_image(row, config, logger, volume=None, progress_callback=None):
     """Procesa una sola imagen del metadata. Devuelve nº de células detectadas.
 
     Lanza excepciones que el llamador captura para continuar con la siguiente.
@@ -81,7 +87,9 @@ def process_image(row, config, logger, volume=None):
     file_stem = stem(filename)
     image_output_dir = os.path.join(config["output_dir"], file_stem, "1")
     out_paths = io_utils.create_output_folders(image_output_dir, include_logs=False)
-    logger.info(f"[{filename}] carpeta de salida: {image_output_dir}")
+    _report_progress(
+        logger, progress_callback, f"[{filename}] carpeta de salida: {image_output_dir}"
+    )
 
     # Validación de calibración física (requerida para volumen/área reales).
     if _is_missing(row["px_xy_um"]) or _is_missing(row["px_z_um"]):
@@ -99,8 +107,13 @@ def process_image(row, config, logger, volume=None):
     if volume is None:
         # --- Carga del z-stack ---
         image_path = os.path.join(config["input_dir"], filename)
+        _report_progress(logger, progress_callback, f"[{filename}] cargando z-stack")
         raw = io_utils.load_zstack(image_path)  # FileNotFoundError / ValueError si falla
-        logger.info(f"[{filename}] cargado: forma {raw.shape}, dtype {raw.dtype}")
+        _report_progress(
+            logger,
+            progress_callback,
+            f"[{filename}] cargado: forma {raw.shape}, dtype {raw.dtype}",
+        )
 
         # --- Normalización a (Z, Y, X) ---
         cp_cfg = config.get("cellpose", {})
@@ -113,7 +126,11 @@ def process_image(row, config, logger, volume=None):
             channel_axis=cp_cfg.get("channel_axis", None),
             channel_to_segment=int(channel_to_segment),
         )
-        logger.info(f"[{filename}] volumen normalizado a (Z,Y,X): {volume.shape}")
+        _report_progress(
+            logger,
+            progress_callback,
+            f"[{filename}] volumen normalizado a (Z,Y,X): {volume.shape}",
+        )
     else:
         volume = np.asarray(volume)
         if volume.ndim != 3:
@@ -121,7 +138,11 @@ def process_image(row, config, logger, volume=None):
                 f"El volumen precargado para '{filename}' no es 3D "
                 f"(forma {volume.shape})."
             )
-        logger.info(f"[{filename}] volumen CZI cargado a (Z,Y,X): {volume.shape}")
+        _report_progress(
+            logger,
+            progress_callback,
+            f"[{filename}] volumen CZI cargado a (Z,Y,X): {volume.shape}",
+        )
 
     if volume.shape[0] < 2:
         logger.warning(
@@ -132,14 +153,17 @@ def process_image(row, config, logger, volume=None):
     # --- Segmentación 3D (import diferido de cellpose dentro del módulo) ---
     import segment_cellpose_3d  # noqa: E402
 
+    _report_progress(logger, progress_callback, f"[{filename}] iniciando segmentación 3D")
     t0 = time.time()
     mask = segment_cellpose_3d.segment_3d_cellpose(volume, config, px_xy_um, px_z_um)
     seg_secs = time.time() - t0
 
     n_cells = int(np.unique(mask[mask != 0]).size)
-    logger.info(
+    _report_progress(
+        logger,
+        progress_callback,
         f"[{filename}] segmentación 3D completada en {seg_secs:.1f}s: "
-        f"{n_cells} célula(s) detectada(s)."
+        f"{n_cells} célula(s) detectada(s).",
     )
     if n_cells == 0:
         logger.warning(f"[{filename}] 0 células detectadas por Cellpose.")
@@ -147,6 +171,7 @@ def process_image(row, config, logger, volume=None):
     # --- Guardar máscara 3D etiquetada ---
     mask_path = os.path.join(out_paths["masks_3d"], f"{file_stem}_masks_3d.tif")
     io_utils.save_tiff(mask_path, mask.astype(np.uint16))
+    _report_progress(logger, progress_callback, f"[{filename}] máscara guardada: {mask_path}")
 
     # --- Mediciones por célula ---
     # Limpia mallas previas de esta imagen para que una re-ejecución no deje
@@ -169,9 +194,10 @@ def process_image(row, config, logger, volume=None):
         out_paths["measurements"], f"{file_stem}_measurements_3d.csv"
     )
     df.to_csv(csv_path, index=False)
-    logger.info(f"[{filename}] mediciones guardadas: {csv_path}")
+    _report_progress(logger, progress_callback, f"[{filename}] mediciones guardadas: {csv_path}")
 
     # --- QC: proyecciones + overlay ---
+    _report_progress(logger, progress_callback, f"[{filename}] generando figuras QC")
     visualize_qc.create_qc_figures(
         volume,
         mask,
@@ -180,12 +206,12 @@ def process_image(row, config, logger, volume=None):
         figures_dir=out_paths["figures_qc"],
         config=config,
     )
-    logger.info(f"[{filename}] figuras QC y proyecciones generadas.")
+    _report_progress(logger, progress_callback, f"[{filename}] figuras QC y proyecciones generadas.")
 
     return n_cells
 
 
-def main(argv=None):
+def main(argv=None, progress_callback=None):
     args = parse_args(argv)
 
     # --- Carga de configuración ---
@@ -237,7 +263,12 @@ def main(argv=None):
                 "px_z_um": px_z,
                 "channel_to_segment": args.channel,
             }
-            n_cells = process_image(row, config, logger, volume=volume)
+            if progress_callback is None:
+                n_cells = process_image(row, config, logger, volume=volume)
+            else:
+                n_cells = process_image(
+                    row, config, logger, volume=volume, progress_callback=progress_callback
+                )
             logger.info(f"CZI mode: {filename} procesado - {n_cells} células.")
             return 0
         except FileNotFoundError as e:
@@ -264,7 +295,10 @@ def main(argv=None):
     for _, row in metadata.iterrows():
         filename = str(row["filename"])
         try:
-            n_cells = process_image(row, config, logger)
+            if progress_callback is None:
+                n_cells = process_image(row, config, logger)
+            else:
+                n_cells = process_image(row, config, logger, progress_callback=progress_callback)
             summary.append((filename, "OK", n_cells))
         except FileNotFoundError as e:
             logger.error(f"[{filename}] archivo no encontrado: {e}")

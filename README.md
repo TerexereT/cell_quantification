@@ -43,6 +43,40 @@ Cuando el entorno está activo verás `(venv)` al inicio del prompt.
 
 ---
 
+## Aplicación de escritorio (.exe)
+
+La app de escritorio permite correr Fase 1 y Fase 2 sin usar PowerShell ni editar
+`config/config.yaml` a mano. Al abrirla veras selectores para:
+
+- Archivo `.czi` de entrada.
+- Canal de segmentacion para Fase 1.
+- Parametros de Cellpose (`diameter`, `flow_threshold`, `cellprob_threshold`,
+  `min_size_voxels`, `gpu`).
+- Parametros de Dbc1 para Fase 2 (`otsu`, `factor` o `fixed`, canales rojo/azul).
+- Carpeta raiz de salida.
+
+Los valores iniciales salen de `config/config.yaml`. Puedes cambiarlos en el
+formulario antes de ejecutar; esos cambios aplican solo a esa corrida y no
+sobrescriben el YAML.
+
+La salida mantiene la misma estructura que el CLI:
+
+```text
+<carpeta_elegida>/<nombre_czi>/1/
+<carpeta_elegida>/<nombre_czi>/2/
+```
+
+El panel GPU muestra si CUDA esta disponible. Si tienes una GPU AMD en Windows,
+la app informa que PyTorch no acelera con ROCm en Windows y que se usara CPU.
+El mensaje recomienda instalar o actualizar drivers de GPU para obtener
+respuestas mas rapidas.
+
+El ejecutable se entrega sin firma digital. Windows SmartScreen puede mostrar
+una advertencia de "editor desconocido"; para continuar, selecciona
+`Mas informacion` y luego `Ejecutar de todas formas`.
+
+---
+
 ## 2. Preparar los datos de entrada
 
 Para Fase 1 solo necesitas el archivo `.czi` original — no hace falta copiarlo
@@ -311,6 +345,34 @@ Una sola imagen 2D no permite reconstrucción 3D real.
 
 **Log:** cada corrida genera `output/logs/pipeline_log.txt` con el registro
 completo de la ejecución.
+
+---
+
+## Reconstruir el .exe
+
+Se usa PyInstaller en modo `onedir`, mas confiable para dependencias nativas
+como `torch`, `cellpose`, `scikit-image` y `matplotlib`.
+
+Desde la raiz del proyecto (`cell_3d_analysis/`):
+
+```powershell
+.\setup.ps1
+.\build_exe.ps1
+```
+
+El script instala `requirements-build.txt`, ejecuta
+`pyinstaller build/cell3d_gui.spec --noconfirm` y deja el resultado en:
+
+```text
+dist/cell3d_gui/cell3d_gui.exe
+```
+
+Notas de distribucion:
+
+- El build no incluye firma digital ni pasos de `signtool`.
+- El resultado puede pesar varios GB porque empaqueta dependencias cientificas y
+  PyTorch.
+- SmartScreen puede mostrar "editor desconocido" la primera vez que se ejecute.
 
 ---
 

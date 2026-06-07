@@ -18,6 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import tifffile  # noqa: E402
+import yaml  # noqa: E402
 from skimage.color import label2rgb  # noqa: E402
 from skimage.filters import threshold_otsu  # noqa: E402
 
@@ -32,6 +33,53 @@ NEGATIVE_LABEL = "Dbc1-"
 POSITIVE_LABEL = "Dbc1+"
 MASK_SUFFIX = "_masks_3d"
 POSITIVE_MASK_SUFFIX = "_masks_dbc1_positive"
+
+
+DEFAULT_PHASE2_CONFIG = {
+    "threshold_mode": "otsu",
+    "factor": DEFAULT_THRESHOLD_FACTOR,
+    "threshold": None,
+    "red_channel": 0,
+    "blue_channel": 1,
+}
+
+
+def load_phase2_config(config_path="config/config.yaml"):
+    """Lee defaults phase2 desde YAML; tolera ausencia para compatibilidad."""
+    defaults = dict(DEFAULT_PHASE2_CONFIG)
+    if not config_path or not Path(config_path).is_file():
+        return defaults
+    with open(config_path, "r", encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle) or {}
+    phase2 = loaded.get("phase2", {})
+    if isinstance(phase2, dict):
+        defaults.update({key: value for key, value in phase2.items() if value is not None})
+        if "threshold" in phase2:
+            defaults["threshold"] = phase2["threshold"]
+    return defaults
+
+
+def resolve_threshold_settings(phase2_defaults, cli_factor=None, cli_threshold=None):
+    """Devuelve (threshold_factor, threshold_value) aplicando prioridad CLI > YAML."""
+    if cli_threshold is not None:
+        return None, cli_threshold
+    if cli_factor is not None:
+        return cli_factor, None
+
+    mode = str(phase2_defaults.get("threshold_mode", "otsu")).strip().lower()
+    if mode == "fixed":
+        threshold = phase2_defaults.get("threshold")
+        return None, None if threshold is None else float(threshold)
+    if mode == "factor":
+        return float(phase2_defaults.get("factor", DEFAULT_THRESHOLD_FACTOR)), None
+    return None, None
+
+
+def _progress(progress_callback, message, emit_console=False):
+    if emit_console:
+        print(message)
+    if progress_callback is not None:
+        progress_callback(message)
 
 
 def _size_from_metadata(meta, tag):
@@ -352,7 +400,7 @@ def save_positive_mask(mask_path, rows, out_path):
 
 
 def process_mask(mask_path, red_proj, blue_proj, red_volume,
-                 threshold_factor=None, threshold_value=None):
+                 threshold_factor=None, threshold_value=None, progress_callback=None):
     mask_path = Path(mask_path)
     # mask_path: output/<exp>/1/masks_3d/<file>.tif
     # Phase 2 outputs go to output/<exp>/2/
@@ -366,6 +414,7 @@ def process_mask(mask_path, red_proj, blue_proj, red_volume,
     masks_out_dir.mkdir(parents=True, exist_ok=True)
 
     stem = image_stem_from_mask(mask_path)
+    _progress(progress_callback, f"[{stem}] cargando máscara 3D")
     mask_3d   = tifffile.imread(str(mask_path))
     mask_proj = max_project(mask_3d)
 
@@ -375,6 +424,7 @@ def process_mask(mask_path, red_proj, blue_proj, red_volume,
             f"blue={blue_proj.shape}, mask_proj={mask_proj.shape}"
         )
 
+    _progress(progress_callback, f"[{stem}] generando overlays rojo/azul")
     save_dual_overlay_figure(
         blue_proj,
         mask_proj,
@@ -388,11 +438,13 @@ def process_mask(mask_path, red_proj, blue_proj, red_volume,
         f"{stem} - canal rojo",
     )
 
+    _progress(progress_callback, f"[{stem}] calculando intensidades y clasificación")
     rows, metadata = measure_intensity(
         red_proj, mask_proj, red_volume, mask_3d, threshold_factor, threshold_value
     )
     write_measurements_csv(measurements_dir / f"{stem}_dbc1_intensity.csv", rows, metadata)
     save_positive_mask(mask_path, rows, masks_out_dir / f"{stem}{POSITIVE_MASK_SUFFIX}.tif")
+    _progress(progress_callback, f"[{stem}] generando figura de clasificación")
     save_classification_figure(
         red_proj,
         mask_proj,
@@ -412,22 +464,28 @@ def process_mask(mask_path, red_proj, blue_proj, red_volume,
 
 
 def process_output(czi_path, output_dir, threshold_factor=None, threshold_value=None,
-                   red_channel=0, blue_channel=1):
+                   red_channel=0, blue_channel=1, progress_callback=None):
+    _progress(progress_callback, f"Cargando CZI: {czi_path}")
     red_volume, blue_volume = load_czi_dual_channel(czi_path, red_channel, blue_channel)
+    _progress(progress_callback, "Calculando proyecciones maxima roja/azul")
     red_proj = max_project(red_volume)
     blue_proj = max_project(blue_volume)
 
     mask_files = discover_mask_files(output_dir)
     if not mask_files:
-        print(f"Warning: no se encontraron máscaras en {output_dir}")
+        _progress(
+            progress_callback,
+            f"Warning: no se encontraron máscaras en {output_dir}",
+            emit_console=True,
+        )
         return []
 
     summaries = []
     for mask_path in mask_files:
-        print(f"Procesando {mask_path}")
+        _progress(progress_callback, f"Procesando {mask_path}", emit_console=True)
         summaries.append(process_mask(
             mask_path, red_proj, blue_proj, red_volume,
-            threshold_factor, threshold_value,
+            threshold_factor, threshold_value, progress_callback=progress_callback,
         ))
     return summaries
 
@@ -451,6 +509,11 @@ def main(argv=None):
     parser.add_argument("czi", help="Ruta al archivo CZI con canal rojo=0 y azul=1.")
     parser.add_argument("output", help="Directorio output/ con subcarpetas y masks_3d.")
     parser.add_argument(
+        "--config",
+        default="config/config.yaml",
+        help="Ruta a config.yaml para leer defaults de phase2.",
+    )
+    parser.add_argument(
         "--factor",
         type=float,
         default=None,
@@ -471,23 +534,34 @@ def main(argv=None):
     parser.add_argument(
         "--red-channel",
         type=int,
-        default=0,
+        default=None,
         dest="red_channel",
         help="Índice de canal rojo (AF647/Dbc1) en el CZI. Default: 0. En Fiji C=1 = índice 0.",
     )
     parser.add_argument(
         "--blue-channel",
         type=int,
-        default=1,
+        default=None,
         dest="blue_channel",
         help="Índice de canal azul (DAPI) en el CZI. Default: 1. En Fiji C=2 = índice 1.",
     )
     args = parser.parse_args(argv)
 
+    phase2_defaults = load_phase2_config(args.config)
+    threshold_factor, threshold_value = resolve_threshold_settings(
+        phase2_defaults, args.factor, args.threshold
+    )
+    red_channel = (
+        args.red_channel if args.red_channel is not None else int(phase2_defaults["red_channel"])
+    )
+    blue_channel = (
+        args.blue_channel if args.blue_channel is not None else int(phase2_defaults["blue_channel"])
+    )
+
     summaries = process_output(
         args.czi, args.output,
-        args.factor, args.threshold,
-        args.red_channel, args.blue_channel,
+        threshold_factor, threshold_value,
+        red_channel, blue_channel,
     )
     print_summary(summaries)
     return 0
