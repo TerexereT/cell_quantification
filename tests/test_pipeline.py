@@ -6,6 +6,8 @@ visualize_qc y el orquestador main, incluyendo casos de éxito, error y borde.
 """
 
 import os
+import sys
+import types
 
 import io_utils
 import measure_3d
@@ -75,6 +77,109 @@ def test_load_zstack_bad_extension(tmp_path):
     with pytest.raises(ValueError) as exc:
         io_utils.load_zstack(str(p))
     assert ".png" in str(exc.value)
+
+
+def test_load_czi_multichannel_extracts_channel_and_calibration(tmp_path, monkeypatch):
+    p = tmp_path / "img.czi"
+    p.write_bytes(b"fake czi")
+    arr = np.arange(2 * 3 * 4 * 5, dtype=np.uint16).reshape(2, 3, 4, 5)
+    meta = (
+        "<SizeC>2</SizeC><SizeZ>3</SizeZ>"
+        '<Distance Id="X"><Value>1.08e-7</Value></Distance>'
+        '<Distance Id="Z"><Value>3.0e-7</Value></Distance>'
+    )
+
+    class FakeCziFile:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def asarray(self):
+            return arr
+
+        def metadata(self):
+            return meta
+
+    fake_czifile = types.SimpleNamespace(CziFile=FakeCziFile)
+    monkeypatch.setitem(sys.modules, "czifile", fake_czifile)
+
+    volume, px_xy, px_z = io_utils.load_czi(str(p), channel=1)
+
+    np.testing.assert_array_equal(volume, arr[1])
+    assert px_xy == pytest.approx(0.108)
+    assert px_z == pytest.approx(0.300)
+
+
+def test_load_czi_missing_file_raises():
+    with pytest.raises(FileNotFoundError):
+        io_utils.load_czi("no_existe.czi")
+
+
+def test_load_czi_channel_out_of_range(tmp_path, monkeypatch):
+    p = tmp_path / "img.czi"
+    p.write_bytes(b"fake czi")
+    arr = np.zeros((2, 3, 4, 5), dtype=np.uint16)
+    meta = "<SizeC>2</SizeC><SizeZ>3</SizeZ>"
+
+    class FakeCziFile:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def asarray(self):
+            return arr
+
+        def metadata(self):
+            return meta
+
+    fake_czifile = types.SimpleNamespace(CziFile=FakeCziFile)
+    monkeypatch.setitem(sys.modules, "czifile", fake_czifile)
+
+    with pytest.raises(ValueError) as exc:
+        io_utils.load_czi(str(p), channel=5)
+    assert "fuera de rango" in str(exc.value)
+
+
+def test_load_czi_single_channel_missing_calibration_returns_none(tmp_path, monkeypatch):
+    p = tmp_path / "single.czi"
+    p.write_bytes(b"fake czi")
+    arr = np.arange(1 * 4 * 5, dtype=np.uint16).reshape(1, 4, 5)
+    meta = "<SizeC>1</SizeC><SizeZ>1</SizeZ>"
+
+    class FakeCziFile:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def asarray(self):
+            return arr
+
+        def metadata(self):
+            return meta
+
+    fake_czifile = types.SimpleNamespace(CziFile=FakeCziFile)
+    monkeypatch.setitem(sys.modules, "czifile", fake_czifile)
+
+    volume, px_xy, px_z = io_utils.load_czi(str(p), channel=0)
+
+    np.testing.assert_array_equal(volume, arr)
+    assert px_xy is None
+    assert px_z is None
 
 
 def test_create_output_folders(tmp_path):
@@ -348,14 +453,15 @@ def test_main_end_to_end(tmp_path, fake_cellpose):
     rc = main.main(["--config", str(cfg_path)])
     assert rc == 0
 
-    out = tmp_path / "output"
+    root_out = tmp_path / "output"
+    out = root_out / "ejemplo_zstack" / "1"
     assert (out / "masks_3d" / "ejemplo_zstack_masks_3d.tif").is_file()
     csv = out / "measurements" / "ejemplo_zstack_measurements_3d.csv"
     assert csv.is_file()
     assert (out / "projections" / "ejemplo_zstack_max_projection.tif").is_file()
     assert (out / "projections" / "ejemplo_zstack_mask_projection.tif").is_file()
     assert (out / "figures_qc" / "ejemplo_zstack_qc_overlay.png").is_file()
-    assert (out / "logs" / "pipeline_log.txt").is_file()
+    assert (root_out / "logs" / "pipeline_log.txt").is_file()
 
     df = pd.read_csv(csv)
     assert len(df) == 2
@@ -373,7 +479,7 @@ def test_main_cleans_stale_meshes(tmp_path, fake_cellpose):
 
     # Primera corrida.
     assert main.main(["--config", str(cfg_path)]) == 0
-    meshes_dir = tmp_path / "output" / "meshes"
+    meshes_dir = tmp_path / "output" / "ejemplo_zstack" / "1" / "meshes"
     # Deja un .obj obsoleto de un cell_id que ya no existe.
     stale = meshes_dir / "ejemplo_zstack_cell_99.obj"
     stale.write_text("v 0 0 0\n", encoding="utf-8")
@@ -388,6 +494,120 @@ def test_main_missing_config():
     import main
     rc = main.main(["--config", "ruta/inexistente.yaml"])
     assert rc == 1
+
+
+def test_main_czi_mode_builds_synthetic_row(tmp_path, monkeypatch):
+    import main
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(f'output_dir: "{(tmp_path / "output").as_posix()}"\n', encoding="utf-8")
+    volume = np.zeros((3, 8, 8), dtype=np.uint16)
+    seen = {}
+
+    def fake_load_czi(path, channel=0):
+        seen["load_czi"] = (path, channel)
+        return volume, 0.108, 0.300
+
+    def fake_process_image(row, config, logger, volume=None):
+        seen["row"] = row
+        seen["volume"] = volume
+        seen["config"] = config
+        return 7
+
+    monkeypatch.setattr(main.io_utils, "load_czi", fake_load_czi)
+    monkeypatch.setattr(main, "process_image", fake_process_image)
+
+    rc = main.main(
+        ["--config", str(cfg_path), "--czi", "sample.czi", "--channel", "1", "--yes"]
+    )
+
+    assert rc == 0
+    assert seen["load_czi"] == ("sample.czi", 1)
+    assert seen["row"] == {
+        "filename": "sample.czi",
+        "px_xy_um": 0.108,
+        "px_z_um": 0.300,
+        "channel_to_segment": 1,
+    }
+    assert seen["volume"] is volume
+    assert seen["config"]["output_dir"] == (tmp_path / "output").as_posix()
+
+
+def test_main_czi_mode_accepts_interactive_confirmation(tmp_path, monkeypatch):
+    import main
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(f'output_dir: "{(tmp_path / "output").as_posix()}"\n', encoding="utf-8")
+    volume = np.zeros((3, 8, 8), dtype=np.uint16)
+    seen = {}
+
+    monkeypatch.setattr(
+        main.io_utils,
+        "load_czi",
+        lambda path, channel=0: (volume, 0.108, 0.300),
+    )
+
+    def fake_process_image(row, config, logger, volume=None):
+        seen["row"] = row
+        seen["volume"] = volume
+        return 3
+
+    monkeypatch.setattr(main, "process_image", fake_process_image)
+    monkeypatch.setattr("builtins.input", lambda prompt: "s")
+
+    rc = main.main(["--config", str(cfg_path), "--czi", "sample.czi"])
+
+    assert rc == 0
+    assert seen["row"]["filename"] == "sample.czi"
+    assert seen["volume"] is volume
+
+
+def test_main_czi_mode_cancel_skips_processing(tmp_path, monkeypatch, capsys):
+    import main
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(f'output_dir: "{(tmp_path / "output").as_posix()}"\n', encoding="utf-8")
+    volume = np.zeros((3, 8, 8), dtype=np.uint16)
+
+    monkeypatch.setattr(
+        main.io_utils,
+        "load_czi",
+        lambda path, channel=0: (volume, 0.108, 0.300),
+    )
+
+    def fake_process_image(row, config, logger, volume=None):
+        raise AssertionError("process_image no debe ejecutarse si el usuario cancela")
+
+    monkeypatch.setattr(main, "process_image", fake_process_image)
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+
+    rc = main.main(["--config", str(cfg_path), "--czi", "sample.czi"])
+
+    assert rc == 0
+    assert "Cancelado." in capsys.readouterr().out
+    log = (tmp_path / "output" / "logs" / "pipeline_log.txt").read_text(encoding="utf-8")
+    assert "operación cancelada" in log
+    assert not (tmp_path / "output" / "sample" / "1").exists()
+
+
+def test_main_czi_mode_summary_shows_missing_calibration(tmp_path, monkeypatch, capsys):
+    import main
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(f'output_dir: "{(tmp_path / "output").as_posix()}"\n', encoding="utf-8")
+    volume = np.zeros((3, 8, 8), dtype=np.uint16)
+
+    monkeypatch.setattr(
+        main.io_utils,
+        "load_czi",
+        lambda path, channel=0: (volume, None, None),
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+
+    rc = main.main(["--config", str(cfg_path), "--czi", "sample.czi"])
+
+    assert rc == 0
+    assert "NO detectada" in capsys.readouterr().out
 
 
 def test_main_missing_image(tmp_path, fake_cellpose):
@@ -409,7 +629,14 @@ def test_main_zero_cells_warns(tmp_path, fake_cellpose):
     cfg_path = _write_project(tmp_path, np.zeros((6, 16, 16), dtype=np.uint16))
     rc = main.main(["--config", str(cfg_path)])
     assert rc == 0
-    csv = tmp_path / "output" / "measurements" / "ejemplo_zstack_measurements_3d.csv"
+    csv = (
+        tmp_path
+        / "output"
+        / "ejemplo_zstack"
+        / "1"
+        / "measurements"
+        / "ejemplo_zstack_measurements_3d.csv"
+    )
     df = pd.read_csv(csv)
     assert len(df) == 0  # CSV con cabecera pero sin filas
     log = (tmp_path / "output" / "logs" / "pipeline_log.txt").read_text(encoding="utf-8")

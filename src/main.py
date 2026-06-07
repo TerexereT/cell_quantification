@@ -3,6 +3,7 @@ main.py — Orquestador del pipeline de análisis 3D de células.
 
 Uso:
     python src/main.py --config config/config.yaml
+    python src/main.py --czi ruta/a/imagen.czi --channel 0
 
 (ejecutar desde la raíz del proyecto cell_3d_analysis/)
 
@@ -46,6 +47,23 @@ def parse_args(argv=None):
         default="config/config.yaml",
         help="Ruta al archivo config.yaml (por defecto: config/config.yaml).",
     )
+    parser.add_argument(
+        "--czi",
+        default=None,
+        help="Ruta a un archivo .czi para procesarlo directamente.",
+    )
+    parser.add_argument(
+        "--channel",
+        type=int,
+        default=0,
+        help="Índice de canal a extraer cuando se usa --czi (default: 0).",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Omite la confirmación interactiva en modo --czi (para scripts/CI).",
+    )
     return parser.parse_args(argv)
 
 
@@ -54,7 +72,7 @@ def _is_missing(value):
     return value is None or (isinstance(value, float) and np.isnan(value))
 
 
-def process_image(row, config, logger):
+def process_image(row, config, logger, volume=None):
     """Procesa una sola imagen del metadata. Devuelve nº de células detectadas.
 
     Lanza excepciones que el llamador captura para continuar con la siguiente.
@@ -78,23 +96,32 @@ def process_image(row, config, logger):
             f"(px_xy_um={px_xy_um}, px_z_um={px_z_um})."
         )
 
-    # --- Carga del z-stack ---
-    image_path = os.path.join(config["input_dir"], filename)
-    raw = io_utils.load_zstack(image_path)  # FileNotFoundError / ValueError si falla
-    logger.info(f"[{filename}] cargado: forma {raw.shape}, dtype {raw.dtype}")
+    if volume is None:
+        # --- Carga del z-stack ---
+        image_path = os.path.join(config["input_dir"], filename)
+        raw = io_utils.load_zstack(image_path)  # FileNotFoundError / ValueError si falla
+        logger.info(f"[{filename}] cargado: forma {raw.shape}, dtype {raw.dtype}")
 
-    # --- Normalización a (Z, Y, X) ---
-    cp_cfg = config.get("cellpose", {})
-    channel_to_segment = row.get("channel_to_segment", 0)
-    if _is_missing(channel_to_segment):
-        channel_to_segment = 0
-    volume = io_utils.prepare_volume(
-        raw,
-        z_axis=cp_cfg.get("z_axis", 0),
-        channel_axis=cp_cfg.get("channel_axis", None),
-        channel_to_segment=int(channel_to_segment),
-    )
-    logger.info(f"[{filename}] volumen normalizado a (Z,Y,X): {volume.shape}")
+        # --- Normalización a (Z, Y, X) ---
+        cp_cfg = config.get("cellpose", {})
+        channel_to_segment = row.get("channel_to_segment", 0)
+        if _is_missing(channel_to_segment):
+            channel_to_segment = 0
+        volume = io_utils.prepare_volume(
+            raw,
+            z_axis=cp_cfg.get("z_axis", 0),
+            channel_axis=cp_cfg.get("channel_axis", None),
+            channel_to_segment=int(channel_to_segment),
+        )
+        logger.info(f"[{filename}] volumen normalizado a (Z,Y,X): {volume.shape}")
+    else:
+        volume = np.asarray(volume)
+        if volume.ndim != 3:
+            raise ValueError(
+                f"El volumen precargado para '{filename}' no es 3D "
+                f"(forma {volume.shape})."
+            )
+        logger.info(f"[{filename}] volumen CZI cargado a (Z,Y,X): {volume.shape}")
 
     if volume.shape[0] < 2:
         logger.warning(
@@ -175,6 +202,53 @@ def main(argv=None):
     logger = setup_logger(log_path)
     logger.info("=== Inicio del pipeline de análisis 3D de células ===")
     logger.info(f"Config: {args.config}")
+
+    if args.czi:
+        try:
+            volume, px_xy, px_z = io_utils.load_czi(args.czi, channel=args.channel)
+            if px_xy is None or px_z is None:
+                logger.warning(
+                    f"[{os.path.basename(args.czi)}] no se pudo extraer calibración "
+                    "completa del CZI."
+                )
+            filename = os.path.basename(args.czi)
+            file_stem = stem(filename)
+            preview_dir = os.path.join(config["output_dir"], file_stem, "1")
+            px_xy_text = px_xy if px_xy is not None else "NO detectada"
+            px_z_text = px_z if px_z is not None else "NO detectada"
+            print("Resumen CZI:")
+            print(f"  Entrada: {args.czi}")
+            print(f"  Canal: {args.channel}")
+            print(f"  Volumen (Z,Y,X): {volume.shape}")
+            print(f"  px_xy_um: {px_xy_text}")
+            print(f"  px_z_um: {px_z_text}")
+            print(f"  Salida: {preview_dir}")
+            if not args.yes:
+                answer = input("¿Continuar con estos parámetros? [y/N]: ")
+                if answer.strip().lower() not in {"y", "yes", "s", "si", "sí"}:
+                    logger.info(
+                        f"[{filename}] operación cancelada por el usuario antes de procesar."
+                    )
+                    print("Cancelado.")
+                    return 0
+            row = {
+                "filename": filename,
+                "px_xy_um": px_xy,
+                "px_z_um": px_z,
+                "channel_to_segment": args.channel,
+            }
+            n_cells = process_image(row, config, logger, volume=volume)
+            logger.info(f"CZI mode: {filename} procesado - {n_cells} células.")
+            return 0
+        except FileNotFoundError as e:
+            logger.error(f"Archivo CZI no encontrado: {e}")
+            return 1
+        except (ImportError, ValueError) as e:
+            logger.error(f"Error en modo CZI: {e}")
+            return 1
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"Error inesperado en modo CZI: {e}")
+            return 1
 
     # --- Carga de metadata ---
     try:

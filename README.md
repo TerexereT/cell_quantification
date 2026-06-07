@@ -91,10 +91,58 @@ muestra1.tif,0.099,2.0,1,nucleo DAPI
 muestra2.tif,0.108,0.300,0,control
 ```
 
-### Convertir archivos .czi a TIFF (si aplica)
+### Opción A: procesar un .czi directamente
 
-El pipeline no lee `.czi` directamente. Usa el conversor incluido, que además
-extrae la calibración del encabezado:
+Para Fase 1 puedes partir del archivo `.czi` sin convertirlo antes a TIFF. El
+pipeline extrae el canal indicado, lee la calibración física del encabezado y
+genera las salidas en la misma estructura que el flujo TIFF:
+
+```powershell
+.\venv\Scripts\python.exe src/main.py --config config/config.yaml --czi "C:\ruta\a\imagen.czi" --channel 1
+```
+
+Antes de procesar, el programa imprime un resumen para confirmar:
+
+- Ruta del `.czi` de entrada.
+- Canal que se va a segmentar.
+- Forma del volumen extraído como `(Z, Y, X)`.
+- Calibración detectada (`px_xy_um` y `px_z_um`) o `NO detectada`.
+- Carpeta de salida que se va a crear: `output/<nombre_czi>/1/`.
+
+Si los parámetros son correctos, responde `y`, `yes`, `s`, `si` o `sí`. Cualquier
+otra respuesta, incluido Enter vacío, cancela antes de correr Cellpose.
+
+Opciones de ejecución:
+
+| Opción | Uso |
+| ------ | --- |
+| `--czi "C:\ruta\a\imagen.czi"` | Procesa ese `.czi` directamente, sin leer `metadata.csv` para la imagen. |
+| `--channel 0` | Canal a extraer y segmentar. Default: `0`. |
+| `--yes` o `-y` | Omite la confirmación interactiva. Útil para scripts o CI. |
+| `--config config/config.yaml` | Mantiene los parámetros de segmentación, medición, QC y `output_dir`. |
+
+Ejemplos:
+
+```powershell
+# Interactivo: muestra resumen y pide confirmación
+.\venv\Scripts\python.exe src/main.py --czi "C:\ruta\a\imagen.czi" --channel 1
+
+# Automatizado: muestra resumen pero no pide confirmación
+.\venv\Scripts\python.exe src/main.py --czi "C:\ruta\a\imagen.czi" --channel 1 --yes
+
+# Usando otra configuración
+.\venv\Scripts\python.exe src/main.py --config config/config.yaml --czi "C:\ruta\a\imagen.czi" --channel 0 --yes
+```
+
+Si el `.czi` no tiene calibración legible, el resumen muestra `NO detectada` y
+el log registra una advertencia. El procesamiento requiere `px_xy_um` y
+`px_z_um`; si alguno queda sin detectar, Fase 1 falla con un error de calibración.
+
+### Opción B: convertir archivos .czi a TIFF
+
+También puedes usar el conversor incluido para generar un TIFF y actualizar
+`metadata.csv`. Este flujo es útil si quieres inspeccionar o reutilizar el TIFF
+antes de correr el pipeline:
 
 ```powershell
 # Convierte el canal 1 (DAPI) y agrega la fila a metadata.csv automáticamente
@@ -122,7 +170,19 @@ Desde la raíz del proyecto, con el entorno activado:
 .\venv\Scripts\python.exe src/main.py --config config/config.yaml
 ```
 
-El pipeline procesa todas las imágenes listadas en `metadata.csv`.
+Ese comando procesa todas las imágenes listadas en `metadata.csv`.
+
+Para procesar un `.czi` directo en un solo paso:
+
+```powershell
+.\venv\Scripts\python.exe src/main.py --czi "C:\ruta\a\imagen.czi" --channel 1
+```
+
+Para correrlo sin prompt de confirmación:
+
+```powershell
+.\venv\Scripts\python.exe src/main.py --czi "C:\ruta\a\imagen.czi" --channel 1 --yes
+```
 
 ### Parametrizar
 
@@ -178,14 +238,19 @@ cellpose:
 
 Las salidas quedan en `output/<nombre_imagen>/1/`:
 
-| Carpeta         | Archivo                        | Contenido                                                    |
-| --------------- | ------------------------------ | ------------------------------------------------------------ |
-| `masks_3d/`     | `<nombre>_masks_3d.tif`        | Máscara 3D etiquetada (0 = fondo, 1..N = células)            |
-| `measurements/` | `<nombre>_measurements_3d.csv` | Una fila por célula con métricas morfológicas 3D             |
-| `projections/`  | `<nombre>_max_projection.tif`  | Proyección de intensidad máxima                              |
-| `projections/`  | `<nombre>_mask_projection.tif` | Proyección máxima de la máscara                              |
-| `meshes/`       | `<nombre>_cell_<id>.obj`       | Malla 3D por célula (si `save_individual_cell_meshes: true`) |
-| `figures_qc/`   | `<nombre>_qc_overlay.png`      | 3 paneles: original / máscara / overlay                      |
+Orden de generación:
+
+| Orden | Carpeta         | Archivo                        | Contenido                                                    |
+| ----- | --------------- | ------------------------------ | ------------------------------------------------------------ |
+| 1     | `masks_3d/`     | `<nombre>_masks_3d.tif`        | Máscara 3D etiquetada (0 = fondo, 1..N = células)            |
+| 2     | `meshes/`       | `<nombre>_cell_<id>.obj`       | Malla 3D por célula (si `save_individual_cell_meshes: true`) |
+| 3     | `measurements/` | `<nombre>_measurements_3d.csv` | Una fila por célula con métricas morfológicas 3D             |
+| 4     | `projections/`  | `<nombre>_max_projection.tif`  | Proyección de intensidad máxima de la imagen segmentada      |
+| 5     | `projections/`  | `<nombre>_mask_projection.tif` | Proyección máxima de la máscara                              |
+| 6     | `figures_qc/`   | `<nombre>_qc_overlay.png`      | 3 paneles: original / máscara / overlay                      |
+
+Para entrada CZI, `<nombre>` sale del nombre del archivo `.czi` sin extensión.
+Ejemplo: `imagen.czi` genera `output/imagen/1/`.
 
 **Columnas del CSV (`_measurements_3d.csv`):**
 

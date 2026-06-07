@@ -10,6 +10,7 @@ Responsabilidades:
 """
 
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -36,6 +37,24 @@ OUTPUT_SUBFOLDERS = [
 
 # Extensiones de imagen aceptadas.
 VALID_TIFF_EXTENSIONS = (".tif", ".tiff")
+
+
+def _size(meta, tag):
+    """Lee <Tag>N</Tag> del XML de metadatos del CZI; 1 si no aparece."""
+    m = re.search(r"<%s>(\d+)</%s>" % (tag, tag), meta)
+    return int(m.group(1)) if m else 1
+
+
+def _calibration_um(meta):
+    """Devuelve (px_xy_um, px_z_um) desde los <Distance Id="X|Y|Z"> en micras."""
+    vals = {}
+    for axis, value in re.findall(
+        r'<Distance Id="([XYZ])">\s*<Value>([0-9eE.\-+]+)', meta
+    ):
+        vals[axis] = float(value) * 1e6
+    px_xy = vals.get("X") or vals.get("Y")
+    px_z = vals.get("Z")
+    return px_xy, px_z
 
 
 def load_config(path):
@@ -114,6 +133,68 @@ def load_zstack(path):
 
     array = tifffile.imread(path)
     return np.asarray(array)
+
+
+def load_czi(path, channel=0):
+    """Lee un CZI, extrae un canal y devuelve (volumen ZYX, px_xy_um, px_z_um).
+
+    Raises
+    ------
+    FileNotFoundError
+        Si el archivo no existe.
+    ImportError
+        Si falta la dependencia czifile.
+    ValueError
+        Si el canal no existe o el array reducido no es 3D.
+    """
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"No se encontró el archivo CZI: {path}")
+
+    try:
+        import czifile
+    except ImportError as exc:
+        raise ImportError(
+            "Falta la dependencia 'czifile'. Instálala con: pip install czifile"
+        ) from exc
+
+    with czifile.CziFile(path) as czi:
+        arr = np.asarray(czi.asarray())
+        meta = czi.metadata()
+
+    size_c = _size(meta, "SizeC")
+    size_z = _size(meta, "SizeZ")
+    px_xy, px_z = _calibration_um(meta)
+
+    arr = np.squeeze(arr)
+
+    if channel < 0 or channel >= size_c:
+        raise ValueError(
+            f"--channel {channel} fuera de rango: el CZI tiene {size_c} canal(es)."
+        )
+
+    if size_c > 1:
+        c_axes = [i for i, s in enumerate(arr.shape) if s == size_c]
+        if not c_axes:
+            raise ValueError(
+                f"No se pudo identificar el eje de canal del CZI "
+                f"(forma {arr.shape}, SizeC={size_c})."
+            )
+        arr = np.take(arr, int(channel), axis=c_axes[0])
+
+    if arr.ndim == 2 and size_z == 1:
+        arr = arr[np.newaxis, :, :]
+
+    if arr.ndim != 3:
+        raise ValueError(
+            f"Tras reducir canales el array no es 3D (forma {arr.shape}). "
+            f"SizeC={size_c}, SizeZ={size_z}. Revisa el archivo."
+        )
+
+    z_axes = [i for i, s in enumerate(arr.shape) if s == size_z]
+    if z_axes and z_axes[0] != 0:
+        arr = np.moveaxis(arr, z_axes[0], 0)
+
+    return arr, px_xy, px_z
 
 
 def create_output_folders(output_dir, include_logs=True):
