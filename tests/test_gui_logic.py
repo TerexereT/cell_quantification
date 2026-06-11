@@ -123,3 +123,42 @@ def test_field_help_covers_declared_ui_fields():
         assert key in app.FIELD_HELP
         assert isinstance(app.FIELD_HELP[key], str)
         assert app.FIELD_HELP[key].strip()
+
+
+def test_phase1_output_status_no_czi():
+    status = app.phase1_output_status("", "output")
+
+    assert status["ready"] is False
+    assert status["mask_count"] == 0
+    assert status["message"]
+
+
+def test_phase1_output_status_missing_masks_dir(tmp_path):
+    status = app.phase1_output_status(r"C:\datos\imagen.czi", str(tmp_path))
+
+    assert status["ready"] is False
+    assert status["mask_count"] == 0
+
+
+def test_phase1_output_status_with_masks(tmp_path):
+    masks_dir = tmp_path / "imagen" / "1" / "masks_3d"
+    masks_dir.mkdir(parents=True)
+    (masks_dir / "imagen_masks_3d.tif").write_bytes(b"")
+    (masks_dir / "imagen_masks_dbc1_positive.tif").write_bytes(b"")
+
+    status = app.phase1_output_status(r"C:\datos\imagen.czi", str(tmp_path))
+
+    assert status["ready"] is True
+    assert status["mask_count"] == 1
+    assert "1" in status["message"]
+
+
+def test_phase1_output_status_only_positive_masks(tmp_path):
+    masks_dir = tmp_path / "imagen" / "1" / "masks_3d"
+    masks_dir.mkdir(parents=True)
+    (masks_dir / "imagen_masks_dbc1_positive.tif").write_bytes(b"")
+
+    status = app.phase1_output_status(r"C:\datos\imagen.czi", str(tmp_path))
+
+    assert status["ready"] is False
+    assert status["mask_count"] == 0

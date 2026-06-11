@@ -6,13 +6,15 @@ ROOT = Path.cwd()
 
 a = Analysis(
     [str(ROOT / "gui" / "app.py")],
-    pathex=[str(ROOT), str(ROOT / "src"), str(ROOT / "tools")],
+    pathex=[str(ROOT), str(ROOT / "src"), str(ROOT / "tools"), str(ROOT / "gui")],
     binaries=[],
     datas=[
         (str(ROOT / "config" / "config.yaml"), "config"),
         (str(ROOT / "docs" / "calculos_justificacion.md"), "docs"),
     ],
     hiddenimports=[
+        "plot_panel",
+        "pandas",
         "cellpose",
         "cellpose.models",
         "torch",

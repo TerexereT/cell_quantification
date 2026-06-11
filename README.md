@@ -1,6 +1,6 @@
 # cell_3d_analysis — Análisis 3D de células a partir de z-stacks de microscopía
 
-Pipeline en Python que segmenta células en 3D con **Cellpose** (`do_3D=True`), reconstruye su superficie con *marching cubes* y exporta mediciones volumétricas (Fase 1), y clasifica cada célula por intensidad de señal Dbc1 (Fase 2).
+Pipeline en Python que segmenta células en 3D con **Cellpose** (`do_3D=True`), reconstruye su superficie con *marching cubes* y exporta mediciones volumétricas (Fase 1), clasifica cada célula por intensidad de señal Dbc1 (Fase 2) y grafica de forma interactiva cualquier par de columnas de los CSV de mediciones exportando a PNG (pestaña Graficar).
 
 ---
 
@@ -45,8 +45,14 @@ Cuando el entorno está activo verás `(venv)` al inicio del prompt.
 
 ## Aplicación de escritorio (.exe)
 
-La app de escritorio permite correr Fase 1 y Fase 2 sin usar PowerShell ni editar
-`config/config.yaml` a mano. Al abrirla veras selectores para:
+La app de escritorio tiene tres pestañas: **"Fase 1"** (segmentación 3D),
+**"Fase 2"** (medición de intensidad y clasificación Dbc1) y **"Graficar"**
+(visualizar y exportar los CSV de mediciones, ver sección 4b). El archivo CZI,
+el canal y la carpeta de Salida se eligen en la zona común superior y son
+compartidos por las Fases 1 y 2; el log de ejecución es común abajo.
+
+Las pestañas Fase 1 y Fase 2 permiten correr el pipeline sin usar PowerShell ni
+editar `config/config.yaml` a mano. Veras selectores para:
 
 - Archivo `.czi` de entrada.
 - Canal de segmentacion para Fase 1.
@@ -302,6 +308,41 @@ Las salidas quedan en `output/<nombre_imagen>/2/`:
 
 *Clasificación (última fila `__metadata__`):*
 `clasificacion, bkg_pp, bkg_pp_3d, PromIntDen_BKG, umbral, metodo_umbral, n_positivas, n_negativas`
+
+---
+
+## 4b. Graficar — Gráficas interactivas de las mediciones
+
+La función Graficar vive en la **app de escritorio**, en la pestaña **"Graficar"**.
+Toma cualquier CSV de mediciones generado por la Fase 1
+(`*_measurements_3d.csv`) o la Fase 2 (`*_dbc1_intensity.csv`) y lo grafica sin
+escribir código.
+
+### Cómo usarla
+
+1. Abre la app (`.exe` o `python -m gui`) y ve a la pestaña **"Graficar"**.
+2. El selector **CSV mediciones** se autocompleta con todos los CSV encontrados
+   bajo la carpeta de salida actual (botón **"Buscar CSV en carpeta de salida"**
+   para refrescar). También puedes elegir cualquier CSV con **`...`**.
+3. Elige la columna del eje **X** y la del eje **Y** (solo se listan columnas
+   numéricas).
+4. Elige el **Tipo** de gráfica: `Dispersion (puntos)` o `Linea`.
+5. La gráfica se **actualiza automáticamente** al cambiar cualquier selector.
+6. Cuando quede como quieres, pulsa **"Exportar PNG"** y elige dónde guardarla
+   (200 dpi).
+
+### Detalles
+
+- La fila de metadatos de la Fase 2 (`cell_id == "__metadata__"`) se descarta
+  automáticamente, así no contamina la gráfica.
+- En modo `Linea` los puntos se ordenan por X antes de unirlos.
+- El nombre sugerido del PNG es `<csv>_<Y>_vs_<X>.png` junto al CSV de origen.
+- La lógica de datos vive en `gui/plot_panel.py` (testeada en
+  `tests/test_plot_panel.py`); la UI se embebe con `matplotlib` (`FigureCanvasTkAgg`).
+
+> Graficar no agrega dependencias nuevas: `pandas` y `matplotlib` ya formaban
+> parte de `requirements.txt`. No hace falta reinstalar nada si ya seguiste el
+> paso de instalación; si partes de cero, `.\setup.ps1` instala todo lo necesario.
 
 ---
 

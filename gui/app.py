@@ -27,7 +27,8 @@ ROOT = resource_root()
 APP_ROOT = app_root()
 SRC = ROOT / "src"
 TOOLS = ROOT / "tools"
-for path in (SRC, TOOLS):
+GUI_DIR = Path(__file__).resolve().parent
+for path in (SRC, TOOLS, GUI_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
@@ -179,6 +180,49 @@ def resolve_output_preview(czi_path, output_dir):
     }
 
 
+def phase1_output_status(czi_path, output_dir):
+    """Indica si existe salida valida de Fase 1 (mascaras 3D) para el CZI dado.
+
+    Devuelve dict con:
+      - ready: True si hay al menos una mascara original en
+        output_dir/<stem_czi>/1/masks_3d/.
+      - mask_count: cantidad de mascaras originales encontradas.
+      - message: texto listo para mostrar en la UI.
+    """
+    if not czi_path:
+        return {
+            "ready": False,
+            "mask_count": 0,
+            "message": "Selecciona un archivo CZI para verificar la Fase 1.",
+        }
+
+    name = stem(os.path.basename(czi_path))
+    masks_dir = Path(output_dir) / name / "1" / "masks_3d"
+    if not masks_dir.is_dir():
+        return {
+            "ready": False,
+            "mask_count": 0,
+            "message": f"Falta ejecutar la Fase 1 (no existe {masks_dir}).",
+        }
+
+    masks = sorted(masks_dir.glob("*.tif")) + sorted(masks_dir.glob("*.tiff"))
+    originals = [
+        p for p in masks if phase2_intensity.POSITIVE_MASK_SUFFIX not in p.stem
+    ]
+    if not originals:
+        return {
+            "ready": False,
+            "mask_count": 0,
+            "message": f"Falta ejecutar la Fase 1 (sin mascaras en {masks_dir}).",
+        }
+
+    return {
+        "ready": True,
+        "mask_count": len(originals),
+        "message": f"Fase 1 lista: {len(originals)} mascara(s) encontrada(s).",
+    }
+
+
 def build_phase1_config(base_config, form_values):
     config = copy.deepcopy(base_config)
     config["output_dir"] = str(form_values["output_dir"])
@@ -248,6 +292,8 @@ class Cell3DApp:
         self.red_var = tk.StringVar(value=str(phase2.get("red_channel", 0)))
         self.blue_var = tk.StringVar(value=str(phase2.get("blue_channel", 1)))
         self.preview_var = tk.StringVar()
+        self.phase1_status_var = tk.StringVar()
+        self.phase1_ready = False
 
         self._build_ui()
         self._refresh_gpu()
@@ -256,21 +302,63 @@ class Cell3DApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self):
-        frame = ttk.Frame(self.root, padding=10)
-        frame.grid(row=0, column=0, sticky="nsew")
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
+
+        common = ttk.Frame(self.root, padding=(10, 10, 10, 0))
+        common.grid(row=0, column=0, sticky="ew")
+        common.columnconfigure(1, weight=1)
+
+        self._file_row(common, 0, "CZI", self.czi_var, self._pick_czi)
+        ttk.Label(common, text="Canal segmentacion").grid(row=1, column=0, sticky="w")
+        ttk.Spinbox(common, from_=0, to=20, textvariable=self.channel_var, width=8).grid(row=1, column=1, sticky="w")
+        self._file_row(common, 2, "Salida", self.output_var, self._pick_output)
+        ttk.Label(common, textvariable=self.preview_var).grid(row=3, column=0, columnspan=3, sticky="w")
+
+        notebook = ttk.Notebook(self.root)
+        notebook.grid(row=1, column=0, sticky="nsew")
+
+        frame = ttk.Frame(notebook, padding=10)
+        notebook.add(frame, text="Fase 1")
         frame.columnconfigure(1, weight=1)
 
-        self._file_row(frame, 0, "CZI", self.czi_var, self._pick_czi)
-        ttk.Label(frame, text="Canal segmentacion").grid(row=1, column=0, sticky="w")
-        ttk.Spinbox(frame, from_=0, to=20, textvariable=self.channel_var, width=8).grid(row=1, column=1, sticky="w")
+        frame2 = ttk.Frame(notebook, padding=10)
+        notebook.add(frame2, text="Fase 2")
+        frame2.columnconfigure(1, weight=1)
+
+        import plot_panel  # noqa: E402
+        plot_tab = plot_panel.build_plot_panel(notebook, self.output_var.get)
+        notebook.add(plot_tab, text="Graficar")
+
+        self._notebook = notebook
+        notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        ttk.Label(
+            frame,
+            text=(
+                "① Selecciona tu archivo CZI y la carpeta de Salida arriba  "
+                "② Ajusta los parametros de segmentacion  ③ Pulsa "
+                "\"Paso 1: Ejecutar Fase 1\""
+            ),
+            font=("TkDefaultFont", 10, "bold"),
+            wraplength=700,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
         phase1 = ttk.LabelFrame(
-            frame, text="Fase 1 — Segmentación 3D de núcleos celulares", padding=8
+            frame, text="Paso 1 / Fase 1 — Segmentación 3D de núcleos celulares", padding=8
         )
-        phase1.grid(row=2, column=0, columnspan=3, sticky="ew", pady=6)
+        phase1.grid(row=1, column=0, columnspan=3, sticky="ew", pady=6)
         phase1.columnconfigure(1, weight=1)
+        ttk.Label(
+            phase1,
+            text=(
+                "Detecta y segmenta cada nucleo en 3D (Cellpose) y guarda sus mascaras "
+                "y mediciones en output/<archivo>/1/."
+            ),
+            wraplength=700,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
         phase1_vars = {
             "diameter": self.diameter_var,
             "flow_threshold": self.flow_var,
@@ -278,25 +366,70 @@ class Cell3DApp:
             "min_size_voxels": self.min_size_var,
         }
         for idx, (label, key) in enumerate(PHASE1_FIELDS[:-1]):
-            ttk.Label(phase1, text=label).grid(row=idx, column=0, sticky="w")
-            ttk.Entry(phase1, textvariable=phase1_vars[key], width=16).grid(row=idx, column=1, sticky="w")
-            self._help_button(phase1, idx, key, label)
-        ttk.Label(phase1, text="gpu").grid(row=4, column=0, sticky="w")
-        ttk.Combobox(phase1, textvariable=self.gpu_var, values=("auto", "true", "false"), width=13, state="readonly").grid(row=4, column=1, sticky="w")
-        self._help_button(phase1, 4, "gpu", "gpu")
+            row = idx + 1
+            self._field_row(
+                phase1, row, label,
+                lambda c, k=key: ttk.Entry(c, textvariable=phase1_vars[k], width=16),
+                key,
+            )
+        self._field_row(
+            phase1, 5, "gpu",
+            lambda c: ttk.Combobox(c, textvariable=self.gpu_var, values=("auto", "true", "false"), width=13, state="readonly"),
+            "gpu",
+        )
         ttk.Button(
             phase1,
             text="Ver justificación de cálculos",
             command=lambda: self._show_formula_section(
                 "phase1", "Justificación de cálculos - Fase 1"
             ),
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        self.gpu_label = ttk.Label(frame, wraplength=700)
+        self.gpu_label.grid(row=2, column=0, columnspan=3, sticky="ew", pady=4)
+
+        self.run1_btn = ttk.Button(frame, text="Paso 1: Ejecutar Fase 1", command=self._run_phase1)
+        self.run1_btn.grid(row=3, column=0, sticky="w", pady=4)
+
+        # --- Fase 2 tab ---
+        ttk.Label(
+            frame2,
+            text=(
+                "① Verifica que la Fase 1 haya generado mascaras (estado abajo)  "
+                "② Ajusta los parametros de Dbc1  ③ Pulsa "
+                "\"Paso 2: Ejecutar Fase 2\""
+            ),
+            font=("TkDefaultFont", 10, "bold"),
+            wraplength=700,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
         phase2 = ttk.LabelFrame(
-            frame, text="Fase 2 — Medición de intensidad y clasificación Dbc1+/−", padding=8
+            frame2, text="Paso 2 / Fase 2 — Medición de intensidad y clasificación Dbc1+/−", padding=8
         )
-        phase2.grid(row=3, column=0, columnspan=3, sticky="ew", pady=6)
+        phase2.grid(row=1, column=0, columnspan=3, sticky="ew", pady=6)
         phase2.columnconfigure(1, weight=1)
+        ttk.Label(
+            phase2,
+            text=(
+                "Mide la intensidad del canal rojo (Dbc1) en las mascaras generadas "
+                "por la Fase 1 y clasifica cada nucleo como Dbc1+ o Dbc1-."
+            ),
+            wraplength=700,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        ttk.Label(
+            phase2,
+            text=(
+                "Requiere haber ejecutado la Fase 1 (usa sus mascaras de "
+                "output/<archivo>/1/masks_3d)."
+            ),
+            wraplength=700,
+            justify="left",
+            foreground="#8a4b00",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        self.phase1_status_label = ttk.Label(phase2, textvariable=self.phase1_status_var, wraplength=700)
+        self.phase1_status_label.grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 6))
         phase2_vars = {
             "threshold_mode": self.threshold_mode_var,
             "factor": self.factor_var,
@@ -306,38 +439,33 @@ class Cell3DApp:
         }
         phase2_values = {"threshold_mode": ("otsu", "factor", "fixed")}
         for idx, (label, key) in enumerate(PHASE2_FIELDS):
-            ttk.Label(phase2, text=label).grid(row=idx, column=0, sticky="w")
+            row = idx + 3
             var = phase2_vars[key]
             values = phase2_values.get(key)
             if values:
-                ttk.Combobox(phase2, textvariable=var, values=values, width=13, state="readonly").grid(row=idx, column=1, sticky="w")
+                factory = lambda c, v=var, vals=values: ttk.Combobox(c, textvariable=v, values=vals, width=13, state="readonly")
             else:
-                ttk.Entry(phase2, textvariable=var, width=16).grid(row=idx, column=1, sticky="w")
-            self._help_button(phase2, idx, key, label)
+                factory = lambda c, v=var: ttk.Entry(c, textvariable=v, width=16)
+            self._field_row(phase2, row, label, factory, key)
         ttk.Button(
             phase2,
             text="Ver justificación de cálculos",
             command=lambda: self._show_formula_section(
                 "phase2", "Justificación de cálculos - Fase 2"
             ),
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
-        self._file_row(frame, 4, "Salida", self.output_var, self._pick_output)
-        ttk.Label(frame, textvariable=self.preview_var).grid(row=5, column=0, columnspan=3, sticky="w")
+        self.run2_btn = ttk.Button(frame2, text="Paso 2: Ejecutar Fase 2", command=self._run_phase2)
+        self.run2_btn.grid(row=2, column=0, sticky="w", pady=4)
 
-        self.gpu_label = ttk.Label(frame, wraplength=700)
-        self.gpu_label.grid(row=6, column=0, columnspan=3, sticky="ew", pady=4)
+        # --- Shared log (visible only on Fase 1 / Fase 2 tabs) ---
+        self.log_frame = ttk.Frame(self.root, padding=(10, 4, 10, 10))
+        self.log_frame.grid(row=2, column=0, sticky="ew")
+        self.log_frame.columnconfigure(0, weight=1)
+        self.log_text = scrolledtext.ScrolledText(self.log_frame, height=8, width=100, state="disabled")
+        self.log_text.grid(row=0, column=0, sticky="nsew")
 
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=7, column=0, columnspan=3, sticky="ew", pady=4)
-        self.run1_btn = ttk.Button(buttons, text="Ejecutar Fase 1", command=self._run_phase1)
-        self.run1_btn.pack(side="left")
-        self.run2_btn = ttk.Button(buttons, text="Ejecutar Fase 2", command=self._run_phase2)
-        self.run2_btn.pack(side="left", padx=6)
-
-        self.log_text = scrolledtext.ScrolledText(frame, height=16, width=100, state="disabled")
-        self.log_text.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=6)
-        frame.rowconfigure(8, weight=1)
+        self._on_tab_changed()
 
     def _file_row(self, frame, row, label, var, command):
         ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w")
@@ -346,13 +474,24 @@ class Cell3DApp:
         entry.bind("<KeyRelease>", lambda _event: self._update_preview())
         ttk.Button(frame, text="...", width=3, command=command).grid(row=row, column=2)
 
-    def _help_button(self, frame, row, key, title):
+    def _field_row(self, parent, row, label_text, widget_factory, key):
+        """Coloca etiqueta + campo + boton de ayuda '?' juntos en la misma fila.
+
+        El campo y el '?' van dentro de un mismo contenedor para que el boton
+        quede pegado al valor (no al borde derecho de la columna estirada).
+        """
+        ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky="w")
+        cell = ttk.Frame(parent)
+        cell.grid(row=row, column=1, sticky="w")
+        widget = widget_factory(cell)
+        widget.pack(side="left")
         ttk.Button(
-            frame,
+            cell,
             text="?",
             width=2,
-            command=lambda: _show_help_popup(self.root, title, FIELD_HELP[key]),
-        ).grid(row=row, column=2, sticky="w", padx=(6, 0))
+            command=lambda: _show_help_popup(self.root, label_text, FIELD_HELP[key]),
+        ).pack(side="left", padx=(4, 0))
+        return widget
 
     def _show_formula_section(self, section_key, title):
         try:
@@ -393,6 +532,16 @@ class Cell3DApp:
     def _update_preview(self):
         preview = resolve_output_preview(self.czi_var.get(), self.output_var.get())
         self.preview_var.set(f"Fase 1: {preview['phase1']} | Fase 2: {preview['phase2']}")
+        self._refresh_phase1_status()
+
+    def _refresh_phase1_status(self):
+        status = phase1_output_status(self.czi_var.get(), self.output_var.get())
+        self.phase1_ready = status["ready"]
+        color = "#1a7f37" if status["ready"] else "#b00020"
+        self.phase1_status_label.configure(foreground=color)
+        self.phase1_status_var.set(status["message"])
+        if not self.running:
+            self.run2_btn.configure(state="normal" if status["ready"] else "disabled")
 
     def _refresh_gpu(self):
         summary = gpu_info.build_gpu_summary()
@@ -405,7 +554,20 @@ class Cell3DApp:
         self.running = running
         state = "disabled" if running else "normal"
         self.run1_btn.configure(state=state)
-        self.run2_btn.configure(state=state)
+        if running:
+            self.run2_btn.configure(state="disabled")
+        else:
+            self.run2_btn.configure(state="normal" if self.phase1_ready else "disabled")
+
+    def _on_tab_changed(self, event=None):
+        try:
+            current = self._notebook.tab(self._notebook.select(), "text")
+        except tk.TclError:
+            return
+        if current in ("Fase 1", "Fase 2"):
+            self.log_frame.grid()
+        else:
+            self.log_frame.grid_remove()
 
     def _append_log(self, message):
         self.log_text.configure(state="normal")
@@ -460,6 +622,15 @@ class Cell3DApp:
     def _run_phase2(self):
         try:
             czi, output = self._validate_common()
+            status = phase1_output_status(czi, output)
+            if not status["ready"]:
+                messagebox.showerror(
+                    "Falta ejecutar la Fase 1",
+                    "La Fase 2 necesita las mascaras generadas por la Fase 1.\n\n"
+                    + status["message"]
+                    + "\n\nEjecuta primero 'Paso 1: Ejecutar Fase 1' para este archivo CZI.",
+                )
+                return
             settings = build_phase2_settings({
                 "threshold_mode": self.threshold_mode_var.get(),
                 "factor": self.factor_var.get(),
@@ -508,6 +679,7 @@ class Cell3DApp:
                 self._append_log(item[2])
                 messagebox.showerror("Error de ejecucion", item[1])
             elif isinstance(item, tuple) and item[0] == "done":
+                self._refresh_phase1_status()
                 self._set_running(False)
             else:
                 self._append_log(item)
