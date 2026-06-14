@@ -6,3 +6,4 @@ scikit-image
 matplotlib
 pyyaml
 czifile
+psutil

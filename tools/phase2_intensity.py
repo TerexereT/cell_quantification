@@ -33,6 +33,7 @@ NEGATIVE_LABEL = "Dbc1-"
 POSITIVE_LABEL = "Dbc1+"
 MASK_SUFFIX = "_masks_3d"
 POSITIVE_MASK_SUFFIX = "_masks_dbc1_positive"
+MASK_PROGRESS_PREFIX = "Procesando "
 
 
 DEFAULT_PHASE2_CONFIG = {
@@ -503,7 +504,7 @@ def process_output(czi_path, output_dir, threshold_factor=None, threshold_value=
 
     summaries = []
     for mask_path in mask_files:
-        _progress(progress_callback, f"Procesando {mask_path}", emit_console=True)
+        _progress(progress_callback, f"{MASK_PROGRESS_PREFIX}{mask_path}", emit_console=True)
         summaries.append(process_mask(
             mask_path, red_proj, blue_proj, red_volume,
             threshold_factor, threshold_value, progress_callback=progress_callback,

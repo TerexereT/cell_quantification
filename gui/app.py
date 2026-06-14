@@ -21,6 +21,7 @@ for _name in ("stdout", "stderr", "stdin"):
         setattr(sys, _name, _NullStream())
 
 import threading
+import time
 import traceback
 from pathlib import Path
 import tkinter as tk
@@ -52,6 +53,7 @@ import gpu_info  # noqa: E402
 import io_utils  # noqa: E402
 import main as pipeline_main  # noqa: E402
 import phase2_intensity  # noqa: E402
+import resource_monitor  # noqa: E402
 from utils import setup_logger, stem  # noqa: E402
 
 CONFIG_PATH = ROOT / "config" / "config.yaml"
@@ -239,6 +241,34 @@ def phase1_output_status(czi_path, output_dir):
     }
 
 
+def discover_phase1_experiments(output_dir):
+    """Lista los experimentos con Fase 1 hecha bajo output_dir.
+
+    Escanea subcarpetas y devuelve, ordenados, los nombres que contienen
+    1/masks_3d/*_masks_3d.tif (máscaras originales; excluye las
+    *_masks_dbc1_positive). Silencioso y tolerante: si output_dir está vacío o
+    no existe, devuelve []. Ignora la subcarpeta 'logs'.
+    """
+    if not output_dir:
+        return []
+    root = Path(output_dir)
+    if not root.is_dir():
+        return []
+
+    found = []
+    for child in sorted(p for p in root.iterdir() if p.is_dir() and p.name != "logs"):
+        masks_dir = child / "1" / "masks_3d"
+        if not masks_dir.is_dir():
+            continue
+        masks = list(masks_dir.glob("*.tif")) + list(masks_dir.glob("*.tiff"))
+        originals = [
+            m for m in masks if phase2_intensity.POSITIVE_MASK_SUFFIX not in m.stem
+        ]
+        if originals:
+            found.append(child.name)
+    return found
+
+
 def build_phase1_config(base_config, form_values):
     config = copy.deepcopy(base_config)
     config["output_dir"] = str(form_values["output_dir"])
@@ -288,6 +318,12 @@ class Cell3DApp:
         self.messages = queue.Queue()
         self.worker = None
         self.running = False
+        self.metrics_var = tk.StringVar(value="")
+        self._t0 = None
+        self._metrics = {"cpu": None, "gpu": None}
+        self._metrics_thread = None
+        self._progress_total = None
+        self._progress_done = 0
 
         self.czi_var = tk.StringVar()
         self.output_var = tk.StringVar(
@@ -331,8 +367,10 @@ class Cell3DApp:
         self._file_row(common, 2, "Salida", self.output_var, self._pick_output)
         ttk.Label(common, textvariable=self.preview_var).grid(row=3, column=0, columnspan=3, sticky="w")
 
-        notebook = ttk.Notebook(self.root)
-        notebook.grid(row=1, column=0, sticky="nsew")
+        self._paned = ttk.PanedWindow(self.root, orient="vertical")
+        self._paned.grid(row=1, column=0, sticky="nsew")
+        notebook = ttk.Notebook(self._paned)
+        self._paned.add(notebook, weight=3)
 
         frame = ttk.Frame(notebook, padding=10)
         notebook.add(frame, text="Fase 1")
@@ -444,8 +482,11 @@ class Cell3DApp:
             justify="left",
             foreground="#8a4b00",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        ttk.Button(
+            phase2, text="Detectar Fase 1", command=self._detect_phase1
+        ).grid(row=2, column=0, sticky="w", pady=(0, 4))
         self.phase1_status_label = ttk.Label(phase2, textvariable=self.phase1_status_var, wraplength=700)
-        self.phase1_status_label.grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        self.phase1_status_label.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 6))
         phase2_vars = {
             "threshold_mode": self.threshold_mode_var,
             "factor": self.factor_var,
@@ -455,7 +496,7 @@ class Cell3DApp:
         }
         phase2_values = {"threshold_mode": ("otsu", "factor", "fixed")}
         for idx, (label, key) in enumerate(PHASE2_FIELDS):
-            row = idx + 3
+            row = idx + 4
             var = phase2_vars[key]
             values = phase2_values.get(key)
             if values:
@@ -469,18 +510,35 @@ class Cell3DApp:
             command=lambda: self._show_formula_section(
                 "phase2", "Justificación de cálculos - Fase 2"
             ),
-        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         self.run2_btn = ttk.Button(frame2, text="Paso 2: Ejecutar Fase 2", command=self._run_phase2)
         self.run2_btn.grid(row=2, column=0, sticky="w", pady=4)
 
-        # --- Shared log (visible only on Fase 1 / Fase 2 tabs) ---
-        self.log_frame = ttk.Frame(self.root, padding=(10, 4, 10, 10))
-        self.log_frame.grid(row=2, column=0, sticky="ew")
-        self.log_frame.columnconfigure(0, weight=1)
-        self.log_text = scrolledtext.ScrolledText(self.log_frame, height=8, width=100, state="disabled")
-        self.log_text.grid(row=0, column=0, sticky="nsew")
+        # --- Panel inferior compartido: métricas + barra + log ---
+        # (segundo panel del PanedWindow; visible solo en Fase 1 / Fase 2).
+        # El sash da altura editable; el padding superior reducido lo acerca
+        # al botón "Ejecutar Fase X".
+        self.bottom_panel = ttk.Frame(self.root, padding=(10, 2, 10, 10))
+        self.bottom_panel.columnconfigure(0, weight=1)
+        self.bottom_panel.rowconfigure(2, weight=1)
 
+        metrics_frame = ttk.Frame(self.bottom_panel)
+        metrics_frame.grid(row=0, column=0, sticky="ew")
+        metrics_frame.columnconfigure(0, weight=1)
+        self.progress = ttk.Progressbar(metrics_frame, mode="indeterminate")
+        self.progress.grid(row=0, column=0, sticky="ew")
+        ttk.Label(metrics_frame, textvariable=self.metrics_var).grid(
+            row=1, column=0, sticky="w", pady=(2, 0)
+        )
+
+        self.log_text = scrolledtext.ScrolledText(
+            self.bottom_panel, height=16, width=100, state="disabled"
+        )
+        self.log_text.grid(row=2, column=0, sticky="nsew", pady=(4, 0))
+
+        self._paned.add(self.bottom_panel, weight=2)
+        self.root.after_idle(self._init_sash, notebook)
         self._on_tab_changed()
 
     def _file_row(self, frame, row, label, var, command):
@@ -555,9 +613,64 @@ class Cell3DApp:
         self.phase1_ready = status["ready"]
         color = "#1a7f37" if status["ready"] else "#b00020"
         self.phase1_status_label.configure(foreground=color)
-        self.phase1_status_var.set(status["message"])
+        message = status["message"]
+        if not status["ready"]:
+            experiments = discover_phase1_experiments(self.output_var.get())
+            if experiments:
+                message += (
+                    "  Fase 1 disponible para: "
+                    + ", ".join(experiments)
+                    + ". Selecciona el CZI correspondiente."
+                )
+        self.phase1_status_var.set(message)
         if not self.running:
             self.run2_btn.configure(state="normal" if status["ready"] else "disabled")
+
+    def _detect_phase1(self):
+        output = self.output_var.get().strip()
+        if not output:
+            messagebox.showwarning(
+                "Detectar Fase 1", "Selecciona primero una carpeta de salida."
+            )
+            return
+
+        experiments = discover_phase1_experiments(output)
+        self._refresh_phase1_status()
+
+        if not experiments:
+            self_as_experiment = (Path(output) / "1" / "masks_3d")
+            if self_as_experiment.is_dir() and (
+                list(self_as_experiment.glob("*.tif"))
+                + list(self_as_experiment.glob("*.tiff"))
+            ):
+                messagebox.showinfo(
+                    "Detectar Fase 1",
+                    "Parece que seleccionaste la carpeta del experimento.\n"
+                    "Elige la carpeta raíz que la contiene (la que tiene dentro "
+                    "una subcarpeta por cada imagen).",
+                )
+            else:
+                messagebox.showinfo(
+                    "Detectar Fase 1",
+                    f"No se encontraron máscaras de Fase 1 en:\n{output}",
+                )
+            return
+
+        czi_stem = stem(os.path.basename(self.czi_var.get())) if self.czi_var.get() else ""
+        if czi_stem in experiments:
+            messagebox.showinfo(
+                "Detectar Fase 1",
+                f"Fase 1 lista para '{czi_stem}'. Puedes ejecutar la Fase 2.",
+            )
+        else:
+            listado = "\n".join(f"  • {name}" for name in experiments)
+            messagebox.showinfo(
+                "Detectar Fase 1",
+                "Se encontró Fase 1 para:\n"
+                + listado
+                + "\n\nSelecciona el CZI correspondiente (mismo nombre) para "
+                "ejecutar la Fase 2.",
+            )
 
     def _refresh_gpu(self):
         summary = gpu_info.build_gpu_summary()
@@ -566,24 +679,60 @@ class Cell3DApp:
         gpus = ", ".join(gpu["name"] for gpu in summary["gpus_detected"]) or "no detectadas"
         self.gpu_label.configure(text=f"GPU: {state} ({device}). Detectadas: {gpus}. {summary['recommendation_message']}")
 
-    def _set_running(self, running):
+    def _set_running(self, running, total=None):
         self.running = running
         state = "disabled" if running else "normal"
         self.run1_btn.configure(state=state)
         if running:
             self.run2_btn.configure(state="disabled")
+            self._progress_total = total
+            self._progress_done = 0
+            self._t0 = time.monotonic()
+            if total:
+                self.progress.configure(mode="determinate", maximum=100, value=0)
+            else:
+                self.progress.configure(mode="indeterminate")
+                self.progress.start(12)
+            self._metrics = {"cpu": None, "gpu": None}
+            self._metrics_thread = threading.Thread(
+                target=self._metrics_loop, daemon=True
+            )
+            self._metrics_thread.start()
         else:
+            self.progress.stop()
+            if self._progress_total:
+                self.progress.configure(value=100)
             self.run2_btn.configure(state="normal" if self.phase1_ready else "disabled")
+
+    def _metrics_loop(self):
+        while self.running:
+            self._metrics["cpu"] = resource_monitor.read_cpu_percent()
+            self._metrics["gpu"] = resource_monitor.read_gpu_usage()
+            time.sleep(1.0)
+
+    def _init_sash(self, notebook):
+        """Coloca el sash dejando el notebook compacto y el log alto."""
+        try:
+            self._paned.sashpos(0, notebook.winfo_reqheight())
+        except tk.TclError:
+            pass
+
+    def _bottom_panel_visible(self):
+        return str(self.bottom_panel) in self._paned.panes()
 
     def _on_tab_changed(self, event=None):
         try:
             current = self._notebook.tab(self._notebook.select(), "text")
         except tk.TclError:
             return
-        if current in ("Fase 1", "Fase 2"):
-            self.log_frame.grid()
-        else:
-            self.log_frame.grid_remove()
+        try:
+            if current in ("Fase 1", "Fase 2"):
+                if not self._bottom_panel_visible():
+                    self._paned.add(self.bottom_panel, weight=2)
+            elif self._bottom_panel_visible():
+                self._paned.forget(self.bottom_panel)
+        except tk.TclError:
+            pass
 
     def _append_log(self, message):
         self.log_text.configure(state="normal")
@@ -658,7 +807,14 @@ class Cell3DApp:
         except Exception as exc:
             messagebox.showerror("Error de parametros", str(exc))
             return
-        self._start_worker(lambda: self._phase2_worker(czi, settings))
+        total = len(
+            phase2_intensity.discover_mask_files(
+                output, experiment=stem(os.path.basename(czi))
+            )
+        )
+        self._start_worker(
+            lambda: self._phase2_worker(czi, settings), total=total or None
+        )
 
     def _phase2_worker(self, czi, settings):
         summaries = phase2_intensity.process_output(
@@ -672,8 +828,8 @@ class Cell3DApp:
         )
         self.messages.put(f"Fase 2 completada: {len(summaries)} carpeta(s).")
 
-    def _start_worker(self, target):
-        self._set_running(True)
+    def _start_worker(self, target, total=None):
+        self._set_running(True, total=total)
         self.worker = threading.Thread(target=self._worker_wrapper, args=(target,), daemon=True)
         self.worker.start()
 
@@ -697,9 +853,36 @@ class Cell3DApp:
             elif isinstance(item, tuple) and item[0] == "done":
                 self._refresh_phase1_status()
                 self._set_running(False)
+                self._update_metrics_label()
             else:
+                if (
+                    self._progress_total
+                    and resource_monitor.is_mask_progress(
+                        item, phase2_intensity.MASK_PROGRESS_PREFIX
+                    )
+                ):
+                    self._progress_done += 1
+                    self.progress.configure(
+                        value=min(100, self._progress_done / self._progress_total * 100)
+                    )
                 self._append_log(item)
+        if self.running:
+            self._update_metrics_label()
         self.root.after(150, self._poll_messages)
+
+    def _update_metrics_label(self):
+        if self._t0 is None:
+            return
+        elapsed = time.monotonic() - self._t0
+        self.metrics_var.set(
+            resource_monitor.format_metrics(
+                elapsed,
+                self._metrics["cpu"],
+                self._metrics["gpu"],
+                done=self._progress_done,
+                total=self._progress_total,
+            )
+        )
 
     def _on_close(self):
         if self.running and not messagebox.askyesno(

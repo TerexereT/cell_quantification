@@ -162,3 +162,43 @@ def test_phase1_output_status_only_positive_masks(tmp_path):
 
     assert status["ready"] is False
     assert status["mask_count"] == 0
+
+
+def _make_experiment(root, name, with_original=True, with_positive=False):
+    masks_dir = root / name / "1" / "masks_3d"
+    masks_dir.mkdir(parents=True)
+    if with_original:
+        (masks_dir / f"{name}_masks_3d.tif").write_bytes(b"")
+    if with_positive:
+        (masks_dir / f"{name}_masks_dbc1_positive.tif").write_bytes(b"")
+
+
+def test_discover_phase1_experiments_empty_and_missing(tmp_path):
+    assert app.discover_phase1_experiments("") == []
+    assert app.discover_phase1_experiments(str(tmp_path / "no_existe")) == []
+    assert app.discover_phase1_experiments(str(tmp_path)) == []
+
+
+def test_discover_phase1_experiments_finds_originals(tmp_path):
+    _make_experiment(tmp_path, "imagen", with_original=True)
+
+    assert app.discover_phase1_experiments(str(tmp_path)) == ["imagen"]
+
+
+def test_discover_phase1_experiments_ignores_only_positive(tmp_path):
+    _make_experiment(tmp_path, "imagen", with_original=False, with_positive=True)
+
+    assert app.discover_phase1_experiments(str(tmp_path)) == []
+
+
+def test_discover_phase1_experiments_ignores_logs(tmp_path):
+    _make_experiment(tmp_path, "logs", with_original=True)
+
+    assert app.discover_phase1_experiments(str(tmp_path)) == []
+
+
+def test_discover_phase1_experiments_sorted_multiple(tmp_path):
+    _make_experiment(tmp_path, "bbb")
+    _make_experiment(tmp_path, "aaa")
+
+    assert app.discover_phase1_experiments(str(tmp_path)) == ["aaa", "bbb"]

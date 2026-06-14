@@ -62,13 +62,18 @@ def draw_plot(ax, df, x_col, y_col, chart_kind):
     if y_col not in df.columns:
         raise ValueError(f"La columna Y '{y_col}' no existe en el CSV.")
 
-    data = df[[x_col, y_col]].apply(pd.to_numeric, errors="coerce").dropna()
+    # Construir cada eje como Series independiente: si x_col == y_col (estado
+    # transitorio al intercambiar X/Y), df[[x_col, y_col]] daría columnas
+    # duplicadas y arrays 2D que cuelgan la UI en modo línea.
+    xs = pd.to_numeric(df[x_col], errors="coerce")
+    ys = pd.to_numeric(df[y_col], errors="coerce")
+    data = pd.DataFrame({"x": xs, "y": ys}).dropna()
     if data.empty:
         raise ValueError("No hay filas con valores numericos para esas columnas.")
 
     ax.clear()
-    x = data[x_col].to_numpy()
-    y = data[y_col].to_numpy()
+    x = data["x"].to_numpy()
+    y = data["y"].to_numpy()
     if chart_kind == "line":
         order = x.argsort()
         ax.plot(x[order], y[order], marker="o", markersize=3, linewidth=1)

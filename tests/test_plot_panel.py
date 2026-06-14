@@ -62,6 +62,23 @@ def test_draw_plot_scatter_and_line(tmp_path):
     assert len(ax.lines) == 1
 
 
+def test_draw_plot_same_column_does_not_explode(tmp_path):
+    # Regresión: X == Y (estado al intercambiar) no debe colgar ni dar arrays 2D.
+    csv = _write_csv(
+        tmp_path / "m.csv",
+        "cell_id,area_px,volume\n1,10,5\n2,20,9\n3,15,7\n",
+    )
+    df = plot_panel.load_measurements(csv)
+    fig = Figure()
+    ax = fig.add_subplot(111)
+    plot_panel.draw_plot(ax, df, "area_px", "area_px", "scatter")
+    offsets = ax.collections[0].get_offsets()
+    assert offsets.shape == (3, 2)  # 3 puntos (x,y), no explosión
+    plot_panel.draw_plot(ax, df, "area_px", "area_px", "line")
+    assert len(ax.lines) == 1
+    assert ax.lines[0].get_xdata().ndim == 1
+
+
 def test_draw_plot_rejects_missing_column(tmp_path):
     csv = _write_csv(tmp_path / "m.csv", "cell_id,area_px\n1,10\n2,20\n")
     df = plot_panel.load_measurements(csv)

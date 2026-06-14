@@ -31,6 +31,22 @@ self._field_row(
 con argumentos por defecto (`k=key`, `v=var`) para evitar el late-binding de
 lambdas.
 
+## Área de progreso / log redimensionable
+
+El notebook (Fase 1/2/Graficar) y el panel inferior (métricas + barra de
+progreso + log) viven en un **`ttk.PanedWindow(orient="vertical")`**. El **sash**
+da al usuario **altura editable** del cuadro de salida; al construir se coloca con
+`after_idle` en `notebook.winfo_reqheight()` para dejar el notebook compacto (gap
+mínimo con el botón "Ejecutar Fase X") y el log alto.
+
+El panel inferior solo es visible en Fase 1/Fase 2: en `_on_tab_changed` se
+`add`/`forget` el pane (no `grid_remove`). Encima del log, una fila muestra
+`Tiempo · %/ETA (Fase 2) · CPU · GPU` (`resource_monitor.format_metrics`),
+alimentada por un hilo daemon (`_metrics_loop`) que se refresca cada ~1 s mientras
+`self.running`. El progreso es **híbrido**: Fase 1 barra indeterminada animada;
+Fase 2 determinada por máscara (cuenta mensajes con prefijo
+`phase2_intensity.MASK_PROGRESS_PREFIX`).
+
 ## Textos instructivos
 
 Cada pestaña abre con una instrucción en **negrita** y pasos numerados
