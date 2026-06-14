@@ -153,14 +153,28 @@ def normalize_for_display(image):
     return np.clip((image - lo) / (hi - lo), 0, 1)
 
 
-def discover_mask_files(output_dir):
-    """Encuentra máscaras originales en subcarpetas output/*/1/masks_3d/*.tif."""
+def discover_mask_files(output_dir, experiment=None):
+    """Encuentra máscaras originales en subcarpetas output/*/1/masks_3d/*.tif.
+
+    Si `experiment` no es None, restringe la búsqueda a la subcarpeta
+    output/<experiment>/1/masks_3d/ (un solo CZI). Con None, escanea todas
+    las subcarpetas (modo batch).
+    """
     output_dir = Path(output_dir)
     if not output_dir.is_dir():
         return []
 
+    if experiment is not None:
+        children = [output_dir / experiment]
+    else:
+        children = sorted(
+            p for p in output_dir.iterdir() if p.is_dir() and p.name != "logs"
+        )
+
     mask_files = []
-    for child in sorted(p for p in output_dir.iterdir() if p.is_dir() and p.name != "logs"):
+    for child in children:
+        if not child.is_dir():
+            continue
         phase1_dir = child / "1"
         masks_dir = phase1_dir / "masks_3d"
         if not masks_dir.is_dir():
@@ -418,6 +432,12 @@ def process_mask(mask_path, red_proj, blue_proj, red_volume,
     mask_3d   = tifffile.imread(str(mask_path))
     mask_proj = max_project(mask_3d)
 
+    if red_volume.shape != mask_3d.shape:
+        raise ValueError(
+            f"Forma 3D incompatible en {mask_path}: red_volume={red_volume.shape}, "
+            f"mask_3d={mask_3d.shape}. ¿La máscara pertenece a otro CZI?"
+        )
+
     if red_proj.shape != mask_proj.shape or blue_proj.shape != mask_proj.shape:
         raise ValueError(
             f"Forma incompatible en {mask_path}: red={red_proj.shape}, "
@@ -471,11 +491,12 @@ def process_output(czi_path, output_dir, threshold_factor=None, threshold_value=
     red_proj = max_project(red_volume)
     blue_proj = max_project(blue_volume)
 
-    mask_files = discover_mask_files(output_dir)
+    experiment = Path(czi_path).stem
+    mask_files = discover_mask_files(output_dir, experiment=experiment)
     if not mask_files:
         _progress(
             progress_callback,
-            f"Warning: no se encontraron máscaras en {output_dir}",
+            f"Warning: no se encontraron máscaras para '{experiment}' en {output_dir}",
             emit_console=True,
         )
         return []

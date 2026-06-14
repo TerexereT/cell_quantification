@@ -33,10 +33,11 @@ def _read_csv_rows(path):
         return list(csv.DictReader(handle))
 
 
-def test_process_output_generates_outputs_for_two_folders(tmp_path, monkeypatch):
+def test_process_output_only_processes_selected_czi(tmp_path, monkeypatch):
     output_dir = tmp_path / "output"
-    _write_mask_run(output_dir, "voxels1500", "sample")
-    _write_mask_run(output_dir, "voxels2000", "sample")
+    # Carpeta del CZI seleccionado + una carpeta ajena que debe ignorarse.
+    _write_mask_run(output_dir, "sample", "sample")
+    _write_mask_run(output_dir, "otro", "otro")
 
     red = np.zeros((2, 4, 5), dtype=np.float32)
     red[:, 0, 0] = 0
@@ -49,21 +50,22 @@ def test_process_output_generates_outputs_for_two_folders(tmp_path, monkeypatch)
         lambda _p, red_channel=0, blue_channel=1: (red, blue),
     )
 
-    summaries = phase2_intensity.process_output("fake.czi", output_dir)
+    summaries = phase2_intensity.process_output("sample.czi", output_dir)
 
-    assert len(summaries) == 2
-    for run_name in ["voxels1500", "voxels2000"]:
-        run_dir = output_dir / run_name / "2"
-        assert (run_dir / "figures_qc" / "sample_qc_blue_overlay.png").is_file()
-        assert (run_dir / "figures_qc" / "sample_qc_red_overlay.png").is_file()
-        assert (run_dir / "figures_qc" / "sample_dbc1_classification.png").is_file()
-        assert (run_dir / "measurements" / "sample_dbc1_intensity.csv").is_file()
-        assert (run_dir / "masks_3d" / "sample_masks_dbc1_positive.tif").is_file()
+    assert len(summaries) == 1
+    run_dir = output_dir / "sample" / "2"
+    assert (run_dir / "figures_qc" / "sample_qc_blue_overlay.png").is_file()
+    assert (run_dir / "figures_qc" / "sample_qc_red_overlay.png").is_file()
+    assert (run_dir / "figures_qc" / "sample_dbc1_classification.png").is_file()
+    assert (run_dir / "measurements" / "sample_dbc1_intensity.csv").is_file()
+    assert (run_dir / "masks_3d" / "sample_masks_dbc1_positive.tif").is_file()
+    # La carpeta ajena no se procesa.
+    assert not (output_dir / "otro" / "2").exists()
 
 
 def test_classification_marks_visibly_low_cell_as_negative(tmp_path, monkeypatch):
     output_dir = tmp_path / "output"
-    mask_path = _write_mask_run(output_dir, "voxels1500", "sample")
+    mask_path = _write_mask_run(output_dir, "sample", "sample")
 
     red = np.zeros((2, 4, 5), dtype=np.float32)
     red[:, 0, 0] = 0
@@ -76,17 +78,17 @@ def test_classification_marks_visibly_low_cell_as_negative(tmp_path, monkeypatch
         lambda _p, red_channel=0, blue_channel=1: (red, blue),
     )
 
-    summaries = phase2_intensity.process_output("fake.czi", output_dir)
+    summaries = phase2_intensity.process_output("sample.czi", output_dir)
 
     assert summaries[0]["n_negative"] == 1
-    rows = _read_csv_rows(output_dir / "voxels1500" / "2" / "measurements" / "sample_dbc1_intensity.csv")
+    rows = _read_csv_rows(output_dir / "sample" / "2" / "measurements" / "sample_dbc1_intensity.csv")
     cell_rows = [row for row in rows if row["cell_id"] != "__metadata__"]
     assert cell_rows[0]["clasificacion"] == phase2_intensity.NEGATIVE_LABEL
     assert all(row["clasificacion"] == phase2_intensity.POSITIVE_LABEL for row in cell_rows[1:])
 
     original = tifffile.imread(str(mask_path))
     filtered = tifffile.imread(
-        str(output_dir / "voxels1500" / "2" / "masks_3d" / "sample_masks_dbc1_positive.tif")
+        str(output_dir / "sample" / "2" / "masks_3d" / "sample_masks_dbc1_positive.tif")
     )
     assert np.unique(filtered[filtered != 0]).size < np.unique(original[original != 0]).size
     assert 1 not in np.unique(filtered)
@@ -138,7 +140,7 @@ def test_uniform_cells_have_sd_zero_and_all_positive():
 
 def test_process_output_progress_callback_is_called(tmp_path, monkeypatch):
     output_dir = tmp_path / "output"
-    _write_mask_run(output_dir, "voxels1500", "sample")
+    _write_mask_run(output_dir, "sample", "sample")
     red = np.ones((2, 4, 5), dtype=np.float32)
     blue = np.ones((2, 4, 5), dtype=np.float32)
     monkeypatch.setattr(
@@ -149,7 +151,7 @@ def test_process_output_progress_callback_is_called(tmp_path, monkeypatch):
     messages = []
 
     summaries = phase2_intensity.process_output(
-        "fake.czi", output_dir, progress_callback=messages.append
+        "sample.czi", output_dir, progress_callback=messages.append
     )
 
     assert len(summaries) == 1
@@ -157,6 +159,23 @@ def test_process_output_progress_callback_is_called(tmp_path, monkeypatch):
     assert "Cargando CZI" in joined
     assert "calculando intensidades" in joined
     assert "generando figura" in joined
+
+
+def test_process_output_raises_on_z_mismatch(tmp_path, monkeypatch):
+    output_dir = tmp_path / "output"
+    # Máscara con Z=3 pero el volumen del CZI tiene Z=2.
+    _write_mask_run(output_dir, "sample", "sample", shape=(3, 4, 5))
+    red = np.ones((2, 4, 5), dtype=np.float32)
+    blue = np.ones((2, 4, 5), dtype=np.float32)
+    monkeypatch.setattr(
+        phase2_intensity,
+        "load_czi_dual_channel",
+        lambda _p, red_channel=0, blue_channel=1: (red, blue),
+    )
+
+    with pytest.raises(ValueError) as exc:
+        phase2_intensity.process_output("sample.czi", output_dir)
+    assert "incompatible" in str(exc.value)
 
 
 def test_load_phase2_config_and_cli_threshold_priority(tmp_path):
