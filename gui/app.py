@@ -4,6 +4,22 @@ import copy
 import os
 import queue
 import sys
+
+# En builds windowed de PyInstaller (console=False) sys.stdout/stderr son None;
+# tqdm/cellpose escriben a stderr al descargar el modelo y crashean. Damos un
+# stream seguro que descarta la salida.
+class _NullStream:
+    def write(self, *a, **k):
+        return 0
+
+    def flush(self):
+        pass
+
+
+for _name in ("stdout", "stderr", "stdin"):
+    if getattr(sys, _name, None) is None:
+        setattr(sys, _name, _NullStream())
+
 import threading
 import traceback
 from pathlib import Path
