@@ -8,6 +8,7 @@ visualize_qc y el orquestador main, incluyendo casos de éxito, error y borde.
 import os
 import sys
 import types
+from pathlib import Path
 
 import io_utils
 import measure_3d
@@ -393,6 +394,44 @@ def test_create_qc_figures(tmp_path):
     assert os.path.isfile(outputs["qc_overlay"])
 
 
+def test_qc_cell_count_uses_explicit_3d_count():
+    mask_proj = np.zeros((8, 8), dtype=np.uint16)
+    mask_proj[1:4, 1:4] = 1
+
+    assert visualize_qc._resolve_cell_count(mask_proj, n_cells=7) == 7
+
+
+def test_create_qc_figures_passes_note_and_n_cells(tmp_path, monkeypatch):
+    image = np.random.rand(3, 8, 8)
+    mask = np.zeros((3, 8, 8), dtype=np.uint16)
+    mask[0, 1:4, 1:4] = 1
+    captured = {}
+
+    def fake_save_overlay(img_proj, mask_proj, out_path, title_stem, n_cells=None, note=None):
+        captured["n_cells"] = n_cells
+        captured["note"] = note
+        Path(out_path).write_bytes(b"png")
+
+    monkeypatch.setattr(visualize_qc, "_save_overlay_figure", fake_save_overlay)
+    proj_dir = tmp_path / "projections"
+    fig_dir = tmp_path / "figures"
+    proj_dir.mkdir()
+    fig_dir.mkdir()
+
+    visualize_qc.create_qc_figures(
+        image,
+        mask,
+        "test",
+        str(proj_dir),
+        str(fig_dir),
+        {"qc": {"save_overlay_projection": True}},
+        n_cells=5,
+        note="diameter=75",
+    )
+
+    assert captured == {"n_cells": 5, "note": "diameter=75"}
+
+
 # ======================================================================
 # main (end-to-end con cellpose mockeado)
 # ======================================================================
@@ -527,6 +566,39 @@ def test_generate_phase1_qc_writes_variant_without_final_outputs(tmp_path, fake_
     assert cache["finalized"] is False
 
 
+def test_generate_phase1_qc_reuse_refreshes_qc_with_3d_count(tmp_path, fake_cellpose, monkeypatch):
+    import main
+
+    mask = np.zeros((8, 24, 24), dtype=np.uint16)
+    mask[1:5, 4:12, 4:12] = 1
+    mask[5:7, 4:12, 4:12] = 2
+    fake_cellpose.return_mask = mask
+    cfg_path = _write_project(tmp_path, mask)
+    config = io_utils.load_config(str(cfg_path))
+    logger = main.setup_logger(str(tmp_path / "qc-reuse.log"))
+    row = {
+        "filename": "ejemplo_zstack.tif",
+        "px_xy_um": 0.108,
+        "px_z_um": 0.300,
+        "channel_to_segment": 0,
+    }
+    first = main.generate_phase1_qc(row, config, logger)
+    captured = {}
+
+    def fake_create_qc_figures(*args, **kwargs):
+        captured["n_cells"] = kwargs.get("n_cells")
+        captured["note"] = kwargs.get("note")
+        return {}
+
+    monkeypatch.setattr(main.visualize_qc, "create_qc_figures", fake_create_qc_figures)
+    reused = main.generate_phase1_qc(row, config, logger, use_cache=True)
+
+    assert reused["reused"] is True
+    assert reused["variant"]["variant_id"] == first["variant"]["variant_id"]
+    assert captured["n_cells"] == 2
+    assert "cellprob_threshold" in captured["note"]
+
+
 def test_finalize_phase1_reuses_qc_variant(tmp_path, fake_cellpose):
     import main
 
@@ -561,6 +633,46 @@ def test_finalize_phase1_reuses_qc_variant(tmp_path, fake_cellpose):
     assert not stale.exists()
     cache = phase1_cache.load_cache(out / "figures_qc")
     assert cache["finalized"] is True
+
+
+def test_finalize_phase1_prunes_old_qc_variants(tmp_path, fake_cellpose):
+    import main
+
+    mask = np.zeros((8, 24, 24), dtype=np.uint16)
+    mask[1:5, 4:12, 4:12] = 1
+    fake_cellpose.return_mask = mask
+    cfg_path = _write_project(tmp_path, mask)
+    config = io_utils.load_config(str(cfg_path))
+    logger = main.setup_logger(str(tmp_path / "finalize-prune.log"))
+    row = {
+        "filename": "ejemplo_zstack.tif",
+        "px_xy_um": 0.108,
+        "px_z_um": 0.300,
+        "channel_to_segment": 0,
+    }
+
+    generated = [
+        main.generate_phase1_qc(row, config, logger, force_new=idx > 0)
+        for idx in range(4)
+    ]
+    n_cells = main.finalize_phase1(
+        row,
+        config,
+        logger,
+        volume=generated[-1]["context"]["volume"],
+        variant_id=generated[-1]["variant"]["variant_id"],
+    )
+
+    out = tmp_path / "output" / "ejemplo_zstack" / "1"
+    cache = phase1_cache.load_cache(out / "figures_qc")
+    kept_ids = [variant["variant_id"] for variant in cache["variants"]]
+    removed_id = generated[0]["variant"]["variant_id"]
+    assert n_cells == 1
+    assert kept_ids == [item["variant"]["variant_id"] for item in generated[1:]]
+    assert removed_id not in kept_ids
+    assert not (out / "masks_3d" / "variants" / removed_id).exists()
+    assert not (out / "projections" / "variants" / removed_id).exists()
+    assert not (out / "figures_qc" / "variants" / removed_id).exists()
 
 
 def test_main_missing_config():

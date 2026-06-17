@@ -57,7 +57,8 @@ Fase 1 usa dos botones con responsabilidades distintas:
   `1/figures_qc/phase1_cache.json` para el programa.
 - `Finalizar`: solo disponible cuando hay una variante QC pendiente. Copia la
   variante activa a las rutas canónicas de Fase 1 y genera mediciones/mallas para
-  habilitar Fase 2.
+  habilitar Fase 2. Al cerrar la Fase 1 conserva solo las 3 variantes QC más
+  recientes y elimina las carpetas de variantes más antiguas.
 
 No habilitar Fase 2 por la sola presencia de cualquier `.tif` en `1/masks_3d/`.
 La UI debe exigir cache finalizado y mostrar un mensaje accionable: ejecutar

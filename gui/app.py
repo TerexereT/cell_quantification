@@ -360,6 +360,32 @@ def build_phase2_settings(form_values):
     }
 
 
+def _cached_value_text(value):
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
+
+
+def apply_phase1_values_to_vars(vars_by_key, values):
+    applied = False
+    mapping = {
+        "diameter": "diameter",
+        "flow_threshold": "flow_threshold",
+        "cellprob_threshold": "cellprob_threshold",
+        "min_size_voxels": "min_size_voxels",
+        "gpu": "gpu",
+        "channel_to_segment": "channel",
+    }
+    for var_key, value_key in mapping.items():
+        if value_key not in values or var_key not in vars_by_key:
+            continue
+        vars_by_key[var_key].set(_cached_value_text(values[value_key]))
+        applied = True
+    return applied
+
+
 class Cell3DApp:
     def __init__(self, root):
         self.root = root
@@ -397,6 +423,7 @@ class Cell3DApp:
         self.phase1_status_var = tk.StringVar()
         self.phase1_ready = False
         self.phase1_qc_ready = False
+        self._loaded_phase1_cache_for = None
 
         self._build_ui()
         self._refresh_gpu()
@@ -663,12 +690,42 @@ class Cell3DApp:
         if path:
             self.czi_var.set(path)
             self._update_preview()
+            self._maybe_load_phase1_values()
 
     def _pick_output(self):
         path = filedialog.askdirectory(initialdir=self.output_var.get())
         if path:
             self.output_var.set(path)
             self._update_preview()
+            self._maybe_load_phase1_values()
+
+    def _maybe_load_phase1_values(self):
+        czi = self.czi_var.get().strip()
+        output = self.output_var.get().strip()
+        if not czi or not output:
+            return False
+        key = (czi, output)
+        if self._loaded_phase1_cache_for == key:
+            return False
+
+        figures_dir = Path(output) / stem(os.path.basename(czi)) / "1" / "figures_qc"
+        cache = phase1_cache.load_cache(figures_dir)
+        values = phase1_cache.latest_phase1_values(cache)
+        self._loaded_phase1_cache_for = key
+        if not values:
+            return False
+
+        return apply_phase1_values_to_vars(
+            {
+                "diameter": self.diameter_var,
+                "flow_threshold": self.flow_var,
+                "cellprob_threshold": self.cellprob_var,
+                "min_size_voxels": self.min_size_var,
+                "gpu": self.gpu_var,
+                "channel_to_segment": self.channel_var,
+            },
+            values,
+        )
 
     def _update_preview(self):
         preview = resolve_output_preview(self.czi_var.get(), self.output_var.get())

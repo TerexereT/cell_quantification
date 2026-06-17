@@ -164,6 +164,19 @@ def _prepare_phase1_context(row, config, logger, volume=None, progress_callback=
     }
 
 
+def _phase1_qc_note(config, channel):
+    cp_cfg = config.get("cellpose", {})
+    keys = (
+        ("canal", channel),
+        ("diameter", cp_cfg.get("diameter")),
+        ("flow_threshold", cp_cfg.get("flow_threshold")),
+        ("cellprob_threshold", cp_cfg.get("cellprob_threshold")),
+        ("min_size_voxels", cp_cfg.get("min_size_voxels")),
+        ("gpu", cp_cfg.get("gpu")),
+    )
+    return " | ".join(f"{key}={value if value is not None else 'null'}" for key, value in keys)
+
+
 def generate_phase1_qc(
     row,
     config,
@@ -203,6 +216,21 @@ def generate_phase1_qc(
             if paths["mask"].is_file():
                 mask = tifffile.imread(str(paths["mask"]))
                 n_cells = int(np.unique(mask[mask != 0]).size)
+                _report_progress(
+                    logger,
+                    progress_callback,
+                    f"[{filename}] actualizando figuras QC cacheadas",
+                )
+                visualize_qc.create_qc_figures(
+                    ctx["volume"],
+                    mask,
+                    file_stem,
+                    projections_dir=str(paths["max_projection"].parent),
+                    figures_dir=str(paths["qc_overlay"].parent),
+                    config=config,
+                    n_cells=n_cells,
+                    note=_phase1_qc_note(config, ctx["channel"]),
+                )
                 _report_progress(
                     logger,
                     progress_callback,
@@ -279,6 +307,8 @@ def generate_phase1_qc(
         projections_dir=str(paths["max_projection"].parent),
         figures_dir=str(paths["qc_overlay"].parent),
         config=config,
+        n_cells=n_cells,
+        note=_phase1_qc_note(config, ctx["channel"]),
     )
     _report_progress(
         logger,
@@ -394,12 +424,15 @@ def finalize_phase1(
         projections_dir=out_paths["projections"],
         figures_dir=out_paths["figures_qc"],
         config=config,
+        n_cells=n_cells,
+        note=_phase1_qc_note(config, ctx["channel"]),
     )
     _report_progress(logger, progress_callback, f"[{filename}] figuras QC y proyecciones generadas.")
 
     assets = dict(canonical)
     assets["meshes_dir"] = out_paths["meshes"]
     cache = phase1_cache.mark_finalized(cache, variant_id, assets)
+    cache = phase1_cache.prune_variants(cache, phase1_dir, file_stem, keep_last=3)
     phase1_cache.write_cache(out_paths["figures_qc"], cache)
     return n_cells
 

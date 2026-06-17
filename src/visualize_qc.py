@@ -26,7 +26,16 @@ def _max_projection(volume, axis=0):
     return np.max(volume, axis=axis)
 
 
-def create_qc_figures(image, mask, filename_stem, projections_dir, figures_dir, config):
+def create_qc_figures(
+    image,
+    mask,
+    filename_stem,
+    projections_dir,
+    figures_dir,
+    config,
+    n_cells=None,
+    note=None,
+):
     """Crea proyecciones y la figura overlay de QC.
 
     Parameters
@@ -69,13 +78,26 @@ def create_qc_figures(image, mask, filename_stem, projections_dir, figures_dir, 
     # --- Figura overlay de QC ---
     if qc_cfg.get("save_overlay_projection", True):
         overlay_path = os.path.join(figures_dir, f"{filename_stem}_qc_overlay.png")
-        _save_overlay_figure(img_proj, mask_proj, overlay_path, filename_stem)
+        _save_overlay_figure(
+            img_proj,
+            mask_proj,
+            overlay_path,
+            filename_stem,
+            n_cells=n_cells,
+            note=note,
+        )
         outputs["qc_overlay"] = overlay_path
 
     return outputs
 
 
-def _save_overlay_figure(img_proj, mask_proj, out_path, title_stem):
+def _resolve_cell_count(mask_proj, n_cells=None):
+    if n_cells is not None:
+        return int(n_cells)
+    return int(np.unique(mask_proj[mask_proj != 0]).size)
+
+
+def _save_overlay_figure(img_proj, mask_proj, out_path, title_stem, n_cells=None, note=None):
     """Genera la figura de 3 paneles: original | máscara | overlay."""
     # Normaliza la imagen a [0, 1] para mostrarla en grises de forma estable.
     img_disp = img_proj.astype(np.float64)
@@ -86,7 +108,7 @@ def _save_overlay_figure(img_proj, mask_proj, out_path, title_stem):
     # label2rgb colorea cada célula; bg_label=0 deja el fondo negro.
     overlay = label2rgb(mask_proj, image=img_disp, bg_label=0, alpha=0.45)
 
-    n_cells = int(np.unique(mask_proj[mask_proj != 0]).size)
+    n_cells = _resolve_cell_count(mask_proj, n_cells)
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     axes[0].imshow(img_disp, cmap="gray")
@@ -98,7 +120,9 @@ def _save_overlay_figure(img_proj, mask_proj, out_path, title_stem):
     for ax in axes:
         ax.axis("off")
 
-    fig.suptitle(title_stem, fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 0.93])  # deja margen superior para el suptitle
+    title = title_stem if not note else f"{title_stem}\n{note}"
+    fig.suptitle(title, fontsize=14)
+    top_margin = 0.88 if note else 0.93
+    fig.tight_layout(rect=[0, 0, 1, top_margin])  # deja margen superior para el suptitle
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close(fig)

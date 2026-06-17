@@ -5,6 +5,17 @@ import pytest
 from gui import app
 
 
+class _Var:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
 def _base_config():
     return {
         "output_dir": "output",
@@ -87,6 +98,84 @@ def test_build_phase1_config_rejects_bad_numeric_value():
                 "gpu": "auto",
             },
         )
+
+
+def test_apply_phase1_values_to_vars_formats_cached_values():
+    vars_by_key = {
+        "diameter": _Var("old"),
+        "flow_threshold": _Var("old"),
+        "cellprob_threshold": _Var("old"),
+        "min_size_voxels": _Var("old"),
+        "gpu": _Var("auto"),
+        "channel_to_segment": _Var("0"),
+    }
+
+    applied = app.apply_phase1_values_to_vars(
+        vars_by_key,
+        {
+            "diameter": None,
+            "flow_threshold": 0.1,
+            "cellprob_threshold": -5.0,
+            "min_size_voxels": 1200,
+            "gpu": False,
+            "channel": 2,
+        },
+    )
+
+    assert applied is True
+    assert vars_by_key["diameter"].get() == "null"
+    assert vars_by_key["flow_threshold"].get() == "0.1"
+    assert vars_by_key["cellprob_threshold"].get() == "-5.0"
+    assert vars_by_key["min_size_voxels"].get() == "1200"
+    assert vars_by_key["gpu"].get() == "false"
+    assert vars_by_key["channel_to_segment"].get() == "2"
+
+
+def test_maybe_load_phase1_values_loads_once_for_czi_output_pair(tmp_path):
+    czi = tmp_path / "sample.czi"
+    czi.write_bytes(b"fake")
+    cache = app.phase1_cache.empty_cache()
+    cache.update({
+        "active_variant_id": "v_test",
+        "variants": [
+            {
+                "variant_id": "v_test",
+                "signature": {
+                    "cellpose": {
+                        "diameter": 75,
+                        "flow_threshold": 0.15,
+                        "cellprob_threshold": -4.0,
+                        "min_size_voxels": 1500,
+                        "gpu": "auto",
+                    },
+                    "extraction": {"channel": 1},
+                },
+            }
+        ],
+    })
+    app.phase1_cache.write_cache(tmp_path / "sample" / "1" / "figures_qc", cache)
+    gui = object.__new__(app.Cell3DApp)
+    gui.czi_var = _Var(str(czi))
+    gui.output_var = _Var(str(tmp_path))
+    gui.diameter_var = _Var("null")
+    gui.flow_var = _Var("0.2")
+    gui.cellprob_var = _Var("-3")
+    gui.min_size_var = _Var("9000")
+    gui.gpu_var = _Var("false")
+    gui.channel_var = _Var("0")
+    gui._loaded_phase1_cache_for = None
+
+    assert gui._maybe_load_phase1_values() is True
+    assert gui.diameter_var.get() == "75"
+    assert gui.flow_var.get() == "0.15"
+    assert gui.cellprob_var.get() == "-4.0"
+    assert gui.min_size_var.get() == "1500"
+    assert gui.gpu_var.get() == "auto"
+    assert gui.channel_var.get() == "1"
+
+    gui.diameter_var.set("manual")
+    assert gui._maybe_load_phase1_values() is False
+    assert gui.diameter_var.get() == "manual"
 
 
 def test_load_formula_sections_splits_phase_content(tmp_path):

@@ -110,3 +110,75 @@ def test_make_variant_id_adds_suffix_when_forced(tmp_path):
     second = phase1_cache.make_variant_id(sig, existing_ids=[first], force_suffix=True)
 
     assert second.startswith(first + "_")
+
+
+def test_latest_phase1_values_prefers_active_variant(tmp_path):
+    active_sig = _signature(tmp_path, diameter=80)
+    old_sig = _signature(tmp_path, diameter=60)
+    cache = phase1_cache.empty_cache()
+    cache["active_variant_id"] = "v_active"
+    cache["variants"] = [
+        {"variant_id": "v_old", "signature": old_sig},
+        {"variant_id": "v_active", "signature": active_sig},
+    ]
+
+    values = phase1_cache.latest_phase1_values(cache)
+
+    assert values["diameter"] == 80
+    assert values["flow_threshold"] == 0.2
+    assert values["cellprob_threshold"] == -3.0
+    assert values["min_size_voxels"] == 9000
+    assert values["gpu"] == "auto"
+    assert values["channel"] == 1
+
+
+def test_latest_phase1_values_falls_back_to_legacy_null(tmp_path):
+    figures = tmp_path / "figures_qc"
+    figures.mkdir()
+    (figures / "medidas.md").write_text(
+        "diameter=null\n"
+        "flow_threshold=0.1\n"
+        "cellprob_threshold=-5\n"
+        "min_size_voxels=1200\n",
+        encoding="utf-8",
+    )
+    cache = phase1_cache.load_cache(figures)
+
+    values = phase1_cache.latest_phase1_values(cache)
+
+    assert values == {
+        "diameter": "null",
+        "flow_threshold": "0.1",
+        "cellprob_threshold": "-5",
+        "min_size_voxels": "1200",
+    }
+
+
+def test_prune_variants_keeps_last_three_and_removes_dirs(tmp_path):
+    phase1_dir = tmp_path / "sample" / "1"
+    stem = "sample"
+    cache = phase1_cache.empty_cache()
+    variants = []
+    for idx in range(4):
+        variant_id = f"v_{idx}"
+        variants.append({"variant_id": variant_id, "signature": {}, "finalized": idx == 3})
+        for path in phase1_cache.variant_paths(phase1_dir, stem, variant_id).values():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+    cache.update({
+        "active_variant_id": "v_3",
+        "finalized_variant_id": "v_3",
+        "finalized": True,
+        "variants": variants,
+    })
+
+    pruned = phase1_cache.prune_variants(cache, phase1_dir, stem, keep_last=3)
+
+    assert [v["variant_id"] for v in pruned["variants"]] == ["v_1", "v_2", "v_3"]
+    assert pruned["active_variant_id"] == "v_3"
+    assert pruned["finalized_variant_id"] == "v_3"
+    assert pruned["finalized"] is True
+    assert not (phase1_dir / "masks_3d" / "variants" / "v_0").exists()
+    assert not (phase1_dir / "projections" / "variants" / "v_0").exists()
+    assert not (phase1_dir / "figures_qc" / "variants" / "v_0").exists()
+    assert (phase1_dir / "masks_3d" / "variants" / "v_1").is_dir()

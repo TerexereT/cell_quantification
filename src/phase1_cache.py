@@ -6,6 +6,7 @@ estructurado que lee el programa vive en ``figures_qc/phase1_cache.json``.
 
 import hashlib
 import json
+import shutil
 from copy import deepcopy
 from datetime import datetime
 from importlib import metadata
@@ -128,6 +129,31 @@ def write_cache(figures_dir_or_path, cache):
         encoding="utf-8",
     )
     return data
+
+
+def latest_phase1_values(cache):
+    """Devuelve los parametros de Fase 1 mas recientes guardados en cache."""
+    values = {}
+    variant = get_variant(cache, cache.get("active_variant_id"))
+    variants = cache.get("variants") or []
+    if variant is None and variants:
+        variant = variants[-1]
+
+    if variant:
+        signature = variant.get("signature", {})
+        cellpose = signature.get("cellpose", {})
+        for key in ("diameter", "flow_threshold", "cellprob_threshold", "min_size_voxels", "gpu"):
+            if key in cellpose:
+                values[key] = cellpose[key]
+        extraction = signature.get("extraction", {})
+        if "channel" in extraction:
+            values["channel"] = extraction["channel"]
+
+    legacy = cache.get("legacy") or {}
+    for key in ("diameter", "flow_threshold", "cellprob_threshold", "min_size_voxels", "gpu", "channel"):
+        if key not in values and key in legacy:
+            values[key] = legacy[key]
+    return values
 
 
 def _format_legacy_value(value):
@@ -295,6 +321,43 @@ def mark_finalized(cache, variant_id, assets):
         variant.setdefault("assets", {}).update({k: str(v) for k, v in assets.items()})
         variant["finalized"] = True
     return cache
+
+
+def prune_variants(cache, phase1_dir, stem, keep_last=3):
+    """Conserva las ultimas variantes y elimina sus carpetas de cache antiguas."""
+    cache = deepcopy(cache)
+    variants = list(cache.get("variants") or [])
+    if keep_last is None or keep_last < 1 or len(variants) <= keep_last:
+        cache["variants"] = variants
+        return cache
+
+    keep = variants[-keep_last:]
+    remove = variants[:-keep_last]
+    phase1_dir = Path(phase1_dir)
+    for variant in remove:
+        variant_id = variant.get("variant_id")
+        if not variant_id:
+            continue
+        paths = variant_paths(phase1_dir, stem, variant_id)
+        for path in paths.values():
+            _remove_variant_parent(path, variant_id)
+
+    keep_ids = {variant.get("variant_id") for variant in keep}
+    if cache.get("active_variant_id") not in keep_ids:
+        cache["active_variant_id"] = keep[-1].get("variant_id") if keep else None
+    if cache.get("finalized_variant_id") not in keep_ids:
+        cache["finalized_variant_id"] = None
+        cache["finalized"] = False
+    cache["variants"] = keep
+    return cache
+
+
+def _remove_variant_parent(file_path, variant_id):
+    variant_dir = Path(file_path).parent
+    if variant_dir.name != variant_id or variant_dir.parent.name != "variants":
+        return
+    if variant_dir.is_dir():
+        shutil.rmtree(variant_dir)
 
 
 def get_variant(cache, variant_id):
