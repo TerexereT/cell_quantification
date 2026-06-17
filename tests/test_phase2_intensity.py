@@ -13,7 +13,7 @@ if TOOLS not in sys.path:
 import phase2_intensity  # noqa: E402
 
 
-def _write_mask_run(output_dir, run_name, stem, shape=(2, 4, 5)):
+def _write_mask_run(output_dir, run_name, stem, shape=(2, 4, 5), finalized=True):
     run_dir = output_dir / run_name / "1"
     masks_dir = run_dir / "masks_3d"
     masks_dir.mkdir(parents=True)
@@ -25,7 +25,30 @@ def _write_mask_run(output_dir, run_name, stem, shape=(2, 4, 5)):
             label += 1
     mask_path = masks_dir / f"{stem}_masks_3d.tif"
     tifffile.imwrite(str(mask_path), mask, photometric="minisblack")
+    if finalized:
+        _write_finalized_cache(output_dir, run_name, stem, mask_path)
     return mask_path
+
+
+def _write_finalized_cache(output_dir, run_name, stem, mask_path):
+    cache = phase2_intensity.phase1_cache.empty_cache()
+    variant_id = "v_test"
+    cache.update({
+        "active_variant_id": variant_id,
+        "finalized_variant_id": variant_id,
+        "finalized": True,
+        "variants": [
+            {
+                "variant_id": variant_id,
+                "signature": {},
+                "assets": {"mask": str(mask_path)},
+                "finalized": True,
+            }
+        ],
+    })
+    phase2_intensity.phase1_cache.write_cache(
+        output_dir / run_name / "1" / "figures_qc", cache
+    )
 
 
 def _read_csv_rows(path):
@@ -100,7 +123,7 @@ def test_missing_czi_raises_file_not_found():
     assert "no_existe.czi" in str(exc.value)
 
 
-def test_no_masks_returns_empty_summary(tmp_path, monkeypatch, capsys):
+def test_no_masks_requires_finalized_phase1(tmp_path, monkeypatch):
     output_dir = tmp_path / "output"
     (output_dir / "voxels1500").mkdir(parents=True)
     monkeypatch.setattr(
@@ -112,10 +135,10 @@ def test_no_masks_returns_empty_summary(tmp_path, monkeypatch, capsys):
         ),
     )
 
-    summaries = phase2_intensity.process_output("fake.czi", output_dir)
+    with pytest.raises(ValueError) as exc:
+        phase2_intensity.process_output("fake.czi", output_dir)
 
-    assert summaries == []
-    assert "Warning" in capsys.readouterr().out
+    assert "Finalizar Fase 1" in str(exc.value)
 
 
 def test_uniform_cells_have_sd_zero_and_all_positive():
@@ -176,6 +199,38 @@ def test_process_output_raises_on_z_mismatch(tmp_path, monkeypatch):
     with pytest.raises(ValueError) as exc:
         phase2_intensity.process_output("sample.czi", output_dir)
     assert "incompatible" in str(exc.value)
+
+
+def test_process_output_rejects_qc_only_phase1(tmp_path, monkeypatch):
+    output_dir = tmp_path / "output"
+    phase1_dir = output_dir / "sample" / "1"
+    variant_dir = phase1_dir / "masks_3d" / "variants" / "v_test"
+    variant_dir.mkdir(parents=True)
+    tifffile.imwrite(
+        str(variant_dir / "sample_masks_3d.tif"),
+        np.zeros((2, 4, 5), dtype=np.uint16),
+        photometric="minisblack",
+    )
+    cache = phase2_intensity.phase1_cache.empty_cache()
+    cache.update({
+        "active_variant_id": "v_test",
+        "finalized": False,
+        "variants": [{"variant_id": "v_test", "signature": {}, "finalized": False}],
+    })
+    phase2_intensity.phase1_cache.write_cache(phase1_dir / "figures_qc", cache)
+    monkeypatch.setattr(
+        phase2_intensity,
+        "load_czi_dual_channel",
+        lambda _p, red_channel=0, blue_channel=1: (
+            np.zeros((2, 4, 5)),
+            np.zeros((2, 4, 5)),
+        ),
+    )
+
+    with pytest.raises(ValueError) as exc:
+        phase2_intensity.process_output("sample.czi", output_dir)
+
+    assert "pendiente de finalizar" in str(exc.value)
 
 
 def test_load_phase2_config_and_cli_threshold_priority(tmp_path):

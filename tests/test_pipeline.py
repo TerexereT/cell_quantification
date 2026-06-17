@@ -13,6 +13,7 @@ import io_utils
 import measure_3d
 import numpy as np
 import pandas as pd
+import phase1_cache
 import pytest
 import segment_cellpose_3d
 import tifffile
@@ -461,12 +462,16 @@ def test_main_end_to_end(tmp_path, fake_cellpose):
     assert (out / "projections" / "ejemplo_zstack_max_projection.tif").is_file()
     assert (out / "projections" / "ejemplo_zstack_mask_projection.tif").is_file()
     assert (out / "figures_qc" / "ejemplo_zstack_qc_overlay.png").is_file()
+    assert (out / "figures_qc" / "medidas.md").is_file()
+    assert (out / "figures_qc" / "phase1_cache.json").is_file()
     assert (root_out / "logs" / "pipeline_log.txt").is_file()
 
     df = pd.read_csv(csv)
     assert len(df) == 2
     assert list(df.columns)[0] == "filename"
     assert set(df["cell_id"]) == {1, 2}
+    cache = phase1_cache.load_cache(out / "figures_qc")
+    assert cache["finalized"] is True
 
 
 def test_main_cleans_stale_meshes(tmp_path, fake_cellpose):
@@ -488,6 +493,74 @@ def test_main_cleans_stale_meshes(tmp_path, fake_cellpose):
     assert main.main(["--config", str(cfg_path)]) == 0
     assert not stale.exists()
     assert (meshes_dir / "ejemplo_zstack_cell_1.obj").is_file()
+
+
+def test_generate_phase1_qc_writes_variant_without_final_outputs(tmp_path, fake_cellpose):
+    import main
+
+    mask = np.zeros((8, 24, 24), dtype=np.uint16)
+    mask[1:5, 4:12, 4:12] = 1
+    fake_cellpose.return_mask = mask
+    cfg_path = _write_project(tmp_path, mask)
+    config = io_utils.load_config(str(cfg_path))
+    logger = main.setup_logger(str(tmp_path / "qc.log"))
+    row = {
+        "filename": "ejemplo_zstack.tif",
+        "px_xy_um": 0.108,
+        "px_z_um": 0.300,
+        "channel_to_segment": 0,
+    }
+
+    result = main.generate_phase1_qc(row, config, logger)
+
+    out = tmp_path / "output" / "ejemplo_zstack" / "1"
+    variant_id = result["variant"]["variant_id"]
+    assert (out / "masks_3d" / "variants" / variant_id / "ejemplo_zstack_masks_3d.tif").is_file()
+    assert (out / "figures_qc" / "variants" / variant_id / "ejemplo_zstack_qc_overlay.png").is_file()
+    assert (out / "figures_qc" / "medidas.md").is_file()
+    assert (out / "figures_qc" / "phase1_cache.json").is_file()
+    assert not (out / "masks_3d" / "ejemplo_zstack_masks_3d.tif").exists()
+    assert not (out / "measurements" / "ejemplo_zstack_measurements_3d.csv").exists()
+    assert not list((out / "meshes").glob("*.obj"))
+    cache = phase1_cache.load_cache(out / "figures_qc")
+    assert cache["active_variant_id"] == variant_id
+    assert cache["finalized"] is False
+
+
+def test_finalize_phase1_reuses_qc_variant(tmp_path, fake_cellpose):
+    import main
+
+    mask = np.zeros((8, 24, 24), dtype=np.uint16)
+    mask[1:5, 4:12, 4:12] = 1
+    fake_cellpose.return_mask = mask
+    cfg_path = _write_project(tmp_path, mask)
+    config = io_utils.load_config(str(cfg_path))
+    logger = main.setup_logger(str(tmp_path / "finalize.log"))
+    row = {
+        "filename": "ejemplo_zstack.tif",
+        "px_xy_um": 0.108,
+        "px_z_um": 0.300,
+        "channel_to_segment": 0,
+    }
+    qc = main.generate_phase1_qc(row, config, logger)
+    stale = tmp_path / "output" / "ejemplo_zstack" / "1" / "meshes" / "ejemplo_zstack_cell_99.obj"
+    stale.write_text("v 0 0 0\n", encoding="utf-8")
+
+    n_cells = main.finalize_phase1(
+        row,
+        config,
+        logger,
+        volume=qc["context"]["volume"],
+        variant_id=qc["variant"]["variant_id"],
+    )
+
+    out = tmp_path / "output" / "ejemplo_zstack" / "1"
+    assert n_cells == 1
+    assert (out / "masks_3d" / "ejemplo_zstack_masks_3d.tif").is_file()
+    assert (out / "measurements" / "ejemplo_zstack_measurements_3d.csv").is_file()
+    assert not stale.exists()
+    cache = phase1_cache.load_cache(out / "figures_qc")
+    assert cache["finalized"] is True
 
 
 def test_main_missing_config():
@@ -528,6 +601,7 @@ def test_main_czi_mode_builds_synthetic_row(tmp_path, monkeypatch):
         "px_xy_um": 0.108,
         "px_z_um": 0.300,
         "channel_to_segment": 1,
+        "source_path": "sample.czi",
     }
     assert seen["volume"] is volume
     assert seen["config"]["output_dir"] == (tmp_path / "output").as_posix()

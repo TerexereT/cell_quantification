@@ -145,12 +145,25 @@ def test_phase1_output_status_with_masks(tmp_path):
     masks_dir.mkdir(parents=True)
     (masks_dir / "imagen_masks_3d.tif").write_bytes(b"")
     (masks_dir / "imagen_masks_dbc1_positive.tif").write_bytes(b"")
+    _write_finalized_cache(tmp_path, "imagen")
 
     status = app.phase1_output_status(r"C:\datos\imagen.czi", str(tmp_path))
 
     assert status["ready"] is True
     assert status["mask_count"] == 1
-    assert "1" in status["message"]
+    assert status["status"] == "finalized"
+
+
+def test_phase1_output_status_legacy_mask_requires_finalize(tmp_path):
+    masks_dir = tmp_path / "imagen" / "1" / "masks_3d"
+    masks_dir.mkdir(parents=True)
+    (masks_dir / "imagen_masks_3d.tif").write_bytes(b"")
+
+    status = app.phase1_output_status(r"C:\datos\imagen.czi", str(tmp_path))
+
+    assert status["ready"] is False
+    assert status["status"] == "legacy_unfinalized"
+    assert "Finalizar" in status["message"]
 
 
 def test_phase1_output_status_only_positive_masks(tmp_path):
@@ -169,8 +182,30 @@ def _make_experiment(root, name, with_original=True, with_positive=False):
     masks_dir.mkdir(parents=True)
     if with_original:
         (masks_dir / f"{name}_masks_3d.tif").write_bytes(b"")
+        _write_finalized_cache(root, name)
     if with_positive:
         (masks_dir / f"{name}_masks_dbc1_positive.tif").write_bytes(b"")
+
+
+def _write_finalized_cache(root, name):
+    cache = app.phase1_cache.empty_cache()
+    variant_id = "v_test"
+    cache.update({
+        "active_variant_id": variant_id,
+        "finalized_variant_id": variant_id,
+        "finalized": True,
+        "variants": [
+            {
+                "variant_id": variant_id,
+                "signature": {},
+                "assets": {
+                    "mask": str(root / name / "1" / "masks_3d" / f"{name}_masks_3d.tif")
+                },
+                "finalized": True,
+            }
+        ],
+    })
+    app.phase1_cache.write_cache(root / name / "1" / "figures_qc", cache)
 
 
 def test_discover_phase1_experiments_empty_and_missing(tmp_path):

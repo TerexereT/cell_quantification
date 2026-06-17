@@ -9,6 +9,7 @@ import argparse
 import csv
 import os
 import re
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -21,6 +22,15 @@ import tifffile  # noqa: E402
 import yaml  # noqa: E402
 from skimage.color import label2rgb  # noqa: E402
 from skimage.filters import threshold_otsu  # noqa: E402
+
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+try:
+    import phase1_cache  # noqa: E402
+except ImportError:
+    phase1_cache = None
 
 try:
     import czifile
@@ -194,6 +204,35 @@ def image_stem_from_mask(mask_path):
     if stem.endswith(MASK_SUFFIX):
         return stem[: -len(MASK_SUFFIX)]
     return stem
+
+
+def validate_phase1_finalized(output_dir, experiment):
+    """Devuelve razones por las que Fase 1 no esta finalizada para Fase 2."""
+    if phase1_cache is None:
+        return []
+
+    phase1_dir = Path(output_dir) / experiment / "1"
+    status = phase1_cache.cache_status(phase1_dir, experiment)
+    if status["finalized"]:
+        return []
+
+    cache = status["cache"]
+    if cache.get("parse_error"):
+        return [f"Cache de Fase 1 incompatible: {cache['parse_error']}"]
+    if status["has_variant"]:
+        return [
+            "Fase 1 tiene QC generado pendiente de finalizar. "
+            "Ejecuta Finalizar Fase 1 antes de Fase 2."
+        ]
+    if status["canonical_mask"].is_file():
+        return [
+            "Se encontro una mascara de Fase 1 sin cache finalizado. "
+            "Ejecuta Generar y luego Finalizar Fase 1 para este CZI."
+        ]
+    return [
+        "La Fase 2 requiere la mascara final de Fase 1. "
+        "Ejecuta Generar y luego Finalizar Fase 1 para este CZI."
+    ]
 
 
 def measure_intensity(red_proj, mask_proj, red_volume, mask_3d,
@@ -436,7 +475,8 @@ def process_mask(mask_path, red_proj, blue_proj, red_volume,
     if red_volume.shape != mask_3d.shape:
         raise ValueError(
             f"Forma 3D incompatible en {mask_path}: red_volume={red_volume.shape}, "
-            f"mask_3d={mask_3d.shape}. ¿La máscara pertenece a otro CZI?"
+            f"mask_3d={mask_3d.shape}. ¿La máscara pertenece a otro CZI o a una "
+            "Fase 1 no finalizada para esta muestra?"
         )
 
     if red_proj.shape != mask_proj.shape or blue_proj.shape != mask_proj.shape:
@@ -493,6 +533,10 @@ def process_output(czi_path, output_dir, threshold_factor=None, threshold_value=
     blue_proj = max_project(blue_volume)
 
     experiment = Path(czi_path).stem
+    phase1_reasons = validate_phase1_finalized(output_dir, experiment)
+    if phase1_reasons:
+        raise ValueError(" ".join(phase1_reasons))
+
     mask_files = discover_mask_files(output_dir, experiment=experiment)
     if not mask_files:
         _progress(

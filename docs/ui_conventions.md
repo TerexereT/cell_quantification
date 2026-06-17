@@ -47,6 +47,22 @@ alimentada por un hilo daemon (`_metrics_loop`) que se refresca cada ~1 s mientr
 Fase 2 determinada por máscara (cuenta mensajes con prefijo
 `phase2_intensity.MASK_PROGRESS_PREFIX`).
 
+## Acciones de Fase 1
+
+Fase 1 usa dos botones con responsabilidades distintas:
+
+- `Generar`: siempre disponible cuando no hay ejecución activa. Crea o reutiliza
+  una variante QC de segmentación en `1/*/variants/<variant_id>/` y actualiza
+  `1/figures_qc/medidas.md` para lectura manual y
+  `1/figures_qc/phase1_cache.json` para el programa.
+- `Finalizar`: solo disponible cuando hay una variante QC pendiente. Copia la
+  variante activa a las rutas canónicas de Fase 1 y genera mediciones/mallas para
+  habilitar Fase 2.
+
+No habilitar Fase 2 por la sola presencia de cualquier `.tif` en `1/masks_3d/`.
+La UI debe exigir cache finalizado y mostrar un mensaje accionable: ejecutar
+`Generar` y luego `Finalizar Fase 1`.
+
 ## Textos instructivos
 
 Cada pestaña abre con una instrucción en **negrita** y pasos numerados

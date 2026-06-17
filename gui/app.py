@@ -52,6 +52,7 @@ for path in (SRC, TOOLS, GUI_DIR):
 import gpu_info  # noqa: E402
 import io_utils  # noqa: E402
 import main as pipeline_main  # noqa: E402
+import phase1_cache  # noqa: E402
 import phase2_intensity  # noqa: E402
 import resource_monitor  # noqa: E402
 from utils import setup_logger, stem  # noqa: E402
@@ -199,45 +200,90 @@ def resolve_output_preview(czi_path, output_dir):
 
 
 def phase1_output_status(czi_path, output_dir):
-    """Indica si existe salida valida de Fase 1 (mascaras 3D) para el CZI dado.
+    """Indica si existe Fase 1 finalizada para el CZI dado.
 
     Devuelve dict con:
-      - ready: True si hay al menos una mascara original en
-        output_dir/<stem_czi>/1/masks_3d/.
-      - mask_count: cantidad de mascaras originales encontradas.
+      - ready: True si hay mascara canonica y cache finalizado.
+      - qc_ready: True si hay una variante QC pendiente de finalizar.
+      - mask_count: cantidad de mascaras canonicas encontradas.
       - message: texto listo para mostrar en la UI.
     """
     if not czi_path:
         return {
             "ready": False,
+            "qc_ready": False,
+            "status": "missing",
             "mask_count": 0,
             "message": "Selecciona un archivo CZI para verificar la Fase 1.",
         }
 
     name = stem(os.path.basename(czi_path))
-    masks_dir = Path(output_dir) / name / "1" / "masks_3d"
+    phase1_dir = Path(output_dir) / name / "1"
+    masks_dir = phase1_dir / "masks_3d"
+    status = phase1_cache.cache_status(phase1_dir, name)
+    canonical_mask = status["canonical_mask"]
+
+    if status["cache"].get("parse_error"):
+        return {
+            "ready": False,
+            "qc_ready": False,
+            "status": "cache_incompatible",
+            "mask_count": 0,
+            "message": status["message"],
+        }
+
+    if status["finalized"]:
+        return {
+            "ready": True,
+            "qc_ready": True,
+            "status": "finalized",
+            "mask_count": 1,
+            "message": f"Fase 1 finalizada: {canonical_mask} lista para Fase 2.",
+        }
+
+    if status["has_variant"]:
+        return {
+            "ready": False,
+            "qc_ready": True,
+            "status": "qc_pending",
+            "mask_count": 0,
+            "message": status["message"],
+        }
+
     if not masks_dir.is_dir():
         return {
             "ready": False,
+            "qc_ready": False,
+            "status": "missing",
             "mask_count": 0,
-            "message": f"Falta ejecutar la Fase 1 (no existe {masks_dir}).",
+            "message": f"Falta ejecutar la Fase 1: usa Generar y luego Finalizar (no existe {masks_dir}).",
         }
 
-    masks = sorted(masks_dir.glob("*.tif")) + sorted(masks_dir.glob("*.tiff"))
+    masks = [canonical_mask] if canonical_mask.is_file() else []
     originals = [
         p for p in masks if phase2_intensity.POSITIVE_MASK_SUFFIX not in p.stem
     ]
     if not originals:
         return {
             "ready": False,
+            "qc_ready": False,
+            "status": "missing",
             "mask_count": 0,
-            "message": f"Falta ejecutar la Fase 1 (sin mascaras en {masks_dir}).",
+            "message": (
+                "La Fase 2 requiere la máscara final de Fase 1. "
+                "Ejecuta Generar y luego Finalizar Fase 1 para este CZI."
+            ),
         }
 
     return {
-        "ready": True,
+        "ready": False,
+        "qc_ready": False,
+        "status": "legacy_unfinalized",
         "mask_count": len(originals),
-        "message": f"Fase 1 lista: {len(originals)} mascara(s) encontrada(s).",
+        "message": (
+            "Se encontró una máscara antigua, pero falta cache finalizado. "
+            "Ejecuta Generar y luego Finalizar Fase 1 para habilitar Fase 2."
+        ),
     }
 
 
@@ -257,10 +303,14 @@ def discover_phase1_experiments(output_dir):
 
     found = []
     for child in sorted(p for p in root.iterdir() if p.is_dir() and p.name != "logs"):
-        masks_dir = child / "1" / "masks_3d"
+        phase1_dir = child / "1"
+        masks_dir = phase1_dir / "masks_3d"
         if not masks_dir.is_dir():
             continue
-        masks = list(masks_dir.glob("*.tif")) + list(masks_dir.glob("*.tiff"))
+        status = phase1_cache.cache_status(phase1_dir, child.name)
+        if not status["finalized"]:
+            continue
+        masks = [status["canonical_mask"]]
         originals = [
             m for m in masks if phase2_intensity.POSITIVE_MASK_SUFFIX not in m.stem
         ]
@@ -346,6 +396,7 @@ class Cell3DApp:
         self.preview_var = tk.StringVar()
         self.phase1_status_var = tk.StringVar()
         self.phase1_ready = False
+        self.phase1_qc_ready = False
 
         self._build_ui()
         self._refresh_gpu()
@@ -408,7 +459,7 @@ class Cell3DApp:
             phase1,
             text=(
                 "Detecta y segmenta cada nucleo en 3D (Cellpose) y guarda sus mascaras "
-                "y mediciones en output/<archivo>/1/."
+                "QC como variantes. Usa Finalizar para crear los archivos que necesita Fase 2."
             ),
             wraplength=700,
             justify="left",
@@ -442,8 +493,24 @@ class Cell3DApp:
         self.gpu_label = ttk.Label(frame, wraplength=700)
         self.gpu_label.grid(row=2, column=0, columnspan=3, sticky="ew", pady=4)
 
-        self.run1_btn = ttk.Button(frame, text="Paso 1: Ejecutar Fase 1", command=self._run_phase1)
-        self.run1_btn.grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Label(
+            frame,
+            text=(
+                "Generar crea variantes QC para ajustar Cellpose. Finalizar confirma "
+                "la variante activa y crea la mascara, mediciones y mallas que Fase 2 necesita."
+            ),
+            wraplength=700,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        phase1_actions = ttk.Frame(frame)
+        phase1_actions.grid(row=4, column=0, columnspan=3, sticky="w", pady=4)
+        self.run1_btn = ttk.Button(phase1_actions, text="Generar", command=self._run_phase1)
+        self.run1_btn.pack(side="left")
+        self.finalize1_btn = ttk.Button(
+            phase1_actions, text="Finalizar", command=self._run_phase1_finalize
+        )
+        self.finalize1_btn.pack(side="left", padx=(6, 0))
 
         # --- Fase 2 tab ---
         ttk.Label(
@@ -611,7 +678,8 @@ class Cell3DApp:
     def _refresh_phase1_status(self):
         status = phase1_output_status(self.czi_var.get(), self.output_var.get())
         self.phase1_ready = status["ready"]
-        color = "#1a7f37" if status["ready"] else "#b00020"
+        self.phase1_qc_ready = status.get("qc_ready", False)
+        color = "#1a7f37" if status["ready"] else ("#8a4b00" if self.phase1_qc_ready else "#b00020")
         self.phase1_status_label.configure(foreground=color)
         message = status["message"]
         if not status["ready"]:
@@ -625,6 +693,9 @@ class Cell3DApp:
         self.phase1_status_var.set(message)
         if not self.running:
             self.run2_btn.configure(state="normal" if status["ready"] else "disabled")
+            self.finalize1_btn.configure(
+                state="normal" if self.phase1_qc_ready and not status["ready"] else "disabled"
+            )
 
     def _detect_phase1(self):
         output = self.output_var.get().strip()
@@ -683,6 +754,7 @@ class Cell3DApp:
         self.running = running
         state = "disabled" if running else "normal"
         self.run1_btn.configure(state=state)
+        self.finalize1_btn.configure(state="disabled" if running else ("normal" if self.phase1_qc_ready and not self.phase1_ready else "disabled"))
         if running:
             self.run2_btn.configure(state="disabled")
             self._progress_total = total
@@ -703,6 +775,9 @@ class Cell3DApp:
             if self._progress_total:
                 self.progress.configure(value=100)
             self.run2_btn.configure(state="normal" if self.phase1_ready else "disabled")
+            self.finalize1_btn.configure(
+                state="normal" if self.phase1_qc_ready and not self.phase1_ready else "disabled"
+            )
 
     def _metrics_loop(self):
         while self.running:
@@ -763,26 +838,131 @@ class Cell3DApp:
                 "gpu": self.gpu_var.get(),
             })
             channel = _parse_int(self.channel_var.get(), "canal segmentacion")
+            volume, px_xy, px_z = io_utils.load_czi(czi, channel=channel)
+            row = self._phase1_row(czi, channel, px_xy, px_z)
+            cache = phase1_cache.load_cache(
+                Path(output) / stem(os.path.basename(czi)) / "1" / "figures_qc"
+            )
+            signature = phase1_cache.build_phase1_signature(
+                czi,
+                row["filename"],
+                stem(row["filename"]),
+                volume,
+                px_xy,
+                px_z,
+                channel,
+                config,
+            )
+            variant, comparison = phase1_cache.find_compatible_variant(cache, signature)
+            use_cache = False
+            force_new = False
+            if variant is not None:
+                paths = phase1_cache.variant_paths(
+                    Path(output) / stem(os.path.basename(czi)) / "1",
+                    stem(os.path.basename(czi)),
+                    variant["variant_id"],
+                )
+                if paths["mask"].is_file():
+                    warnings = "\n".join(comparison.get("warnings") or [])
+                    msg = (
+                        "Se encontró una variante QC compatible.\n\n"
+                        f"Variante: {variant['variant_id']}\n"
+                        "Reutilizarla evita ejecutar Cellpose otra vez y conserva "
+                        "la misma segmentación cacheada para estos parámetros.\n\n"
+                        "¿Reutilizar esta variante?"
+                    )
+                    if warnings:
+                        msg += "\n\nAdvertencias:\n" + warnings
+                    use_cache = messagebox.askyesno("Reutilizar cache de Fase 1", msg)
+                    force_new = not use_cache
+            elif cache.get("variants"):
+                latest = cache["variants"][-1]
+                latest_comparison = phase1_cache.compare_phase1_signature(
+                    latest.get("signature", {}), signature
+                )
+                reasons = "\n".join(latest_comparison.get("blocking_reasons") or [])
+                if reasons:
+                    messagebox.showwarning(
+                        "Cache incompatible",
+                        "No se puede reutilizar la variante QC más reciente:\n\n"
+                        + reasons
+                        + "\n\nSe generará una variante nueva.",
+                    )
+                force_new = True
+            elif cache.get("parse_error"):
+                messagebox.showwarning("Cache incompatible", cache["parse_error"])
+                force_new = True
         except Exception as exc:
             messagebox.showerror("Error de parametros", str(exc))
             return
-        self._start_worker(lambda: self._phase1_worker(czi, channel, config))
+        self._start_worker(
+            lambda: self._phase1_generate_worker(
+                czi, channel, config, volume, px_xy, px_z, use_cache, force_new
+            )
+        )
 
-    def _phase1_worker(self, czi, channel, config):
-        logs_dir = Path(config["output_dir"]) / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        logger = setup_logger(str(logs_dir / "pipeline_log.txt"))
-        volume, px_xy, px_z = io_utils.load_czi(czi, channel=channel)
-        row = {
+    def _phase1_row(self, czi, channel, px_xy, px_z):
+        return {
             "filename": os.path.basename(czi),
             "px_xy_um": px_xy,
             "px_z_um": px_z,
             "channel_to_segment": channel,
+            "source_path": czi,
         }
-        n_cells = pipeline_main.process_image(
+
+    def _phase1_generate_worker(self, czi, channel, config, volume, px_xy, px_z, use_cache, force_new):
+        logs_dir = Path(config["output_dir"]) / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        logger = setup_logger(str(logs_dir / "pipeline_log.txt"))
+        row = self._phase1_row(czi, channel, px_xy, px_z)
+        result = pipeline_main.generate_phase1_qc(
+            row,
+            config,
+            logger,
+            volume=volume,
+            progress_callback=self.messages.put,
+            use_cache=use_cache,
+            force_new=force_new,
+        )
+        action = "reutilizada" if result["reused"] else "generada"
+        self.messages.put(
+            f"QC Fase 1 {action}: {result['n_cells']} celula(s). Pulsa Finalizar para habilitar Fase 2."
+        )
+
+    def _run_phase1_finalize(self):
+        try:
+            czi, output = self._validate_common()
+            config = build_phase1_config(self.base_config, {
+                "output_dir": output,
+                "diameter": self.diameter_var.get(),
+                "flow_threshold": self.flow_var.get(),
+                "cellprob_threshold": self.cellprob_var.get(),
+                "min_size_voxels": self.min_size_var.get(),
+                "gpu": self.gpu_var.get(),
+            })
+            channel = _parse_int(self.channel_var.get(), "canal segmentacion")
+            status = phase1_output_status(czi, output)
+            if not status.get("qc_ready"):
+                messagebox.showerror(
+                    "Falta generar QC",
+                    "Ejecuta Generar y luego Finalizar Fase 1 para este CZI.",
+                )
+                return
+        except Exception as exc:
+            messagebox.showerror("Error de parametros", str(exc))
+            return
+        self._start_worker(lambda: self._phase1_finalize_worker(czi, channel, config))
+
+    def _phase1_finalize_worker(self, czi, channel, config):
+        logs_dir = Path(config["output_dir"]) / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        logger = setup_logger(str(logs_dir / "pipeline_log.txt"))
+        volume, px_xy, px_z = io_utils.load_czi(czi, channel=channel)
+        row = self._phase1_row(czi, channel, px_xy, px_z)
+        n_cells = pipeline_main.finalize_phase1(
             row, config, logger, volume=volume, progress_callback=self.messages.put
         )
-        self.messages.put(f"Fase 1 completada: {n_cells} celula(s).")
+        self.messages.put(f"Fase 1 finalizada: {n_cells} celula(s). Fase 2 habilitada.")
 
     def _run_phase2(self):
         try:
@@ -790,10 +970,10 @@ class Cell3DApp:
             status = phase1_output_status(czi, output)
             if not status["ready"]:
                 messagebox.showerror(
-                    "Falta ejecutar la Fase 1",
-                    "La Fase 2 necesita las mascaras generadas por la Fase 1.\n\n"
+                    "Falta finalizar la Fase 1",
+                    "La Fase 2 requiere la máscara final de Fase 1.\n\n"
                     + status["message"]
-                    + "\n\nEjecuta primero 'Paso 1: Ejecutar Fase 1' para este archivo CZI.",
+                    + "\n\nEjecuta Generar y luego Finalizar Fase 1 para este CZI.",
                 )
                 return
             settings = build_phase2_settings({

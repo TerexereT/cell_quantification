@@ -28,12 +28,14 @@ import time
 
 import numpy as np
 import pandas as pd
+import tifffile
 
 # Permite ejecutar tanto `python src/main.py` como `python main.py` desde src/.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import io_utils  # noqa: E402
 import measure_3d  # noqa: E402
+import phase1_cache  # noqa: E402
 import visualize_qc  # noqa: E402
 from utils import setup_logger, stem  # noqa: E402
 
@@ -78,11 +80,7 @@ def _report_progress(logger, progress_callback, message, level="info"):
         progress_callback(message)
 
 
-def process_image(row, config, logger, volume=None, progress_callback=None):
-    """Procesa una sola imagen del metadata. Devuelve nº de células detectadas.
-
-    Lanza excepciones que el llamador captura para continuar con la siguiente.
-    """
+def _prepare_phase1_context(row, config, logger, volume=None, progress_callback=None):
     filename = str(row["filename"])
     file_stem = stem(filename)
     image_output_dir = os.path.join(config["output_dir"], file_stem, "1")
@@ -150,12 +148,91 @@ def process_image(row, config, logger, volume=None, progress_callback=None):
             f"permite reconstrucción 3D real. Se necesita un z-stack."
         )
 
+    return {
+        "filename": filename,
+        "file_stem": file_stem,
+        "image_output_dir": image_output_dir,
+        "out_paths": out_paths,
+        "volume": volume,
+        "px_xy_um": px_xy_um,
+        "px_z_um": px_z_um,
+        "channel": int(row.get("channel_to_segment", 0) or 0),
+        "source_path": row.get(
+            "source_path",
+            os.path.join(config.get("input_dir", ""), filename),
+        ),
+    }
+
+
+def generate_phase1_qc(
+    row,
+    config,
+    logger,
+    volume=None,
+    progress_callback=None,
+    use_cache=True,
+    force_new=False,
+):
+    """Genera o reutiliza una variante QC de Fase 1 sin CSV/mallas finales."""
+    ctx = _prepare_phase1_context(row, config, logger, volume, progress_callback)
+    filename = ctx["filename"]
+    file_stem = ctx["file_stem"]
+    phase1_dir = ctx["image_output_dir"]
+    figures_dir = ctx["out_paths"]["figures_qc"]
+    cache = phase1_cache.load_cache(figures_dir)
+
+    current_signature = phase1_cache.build_phase1_signature(
+        ctx["source_path"],
+        filename,
+        file_stem,
+        ctx["volume"],
+        ctx["px_xy_um"],
+        ctx["px_z_um"],
+        ctx["channel"],
+        config,
+    )
+
+    if use_cache and not force_new:
+        variant, comparison = phase1_cache.find_compatible_variant(
+            cache, current_signature
+        )
+        if variant is not None:
+            paths = phase1_cache.variant_paths(
+                phase1_dir, file_stem, variant["variant_id"]
+            )
+            if paths["mask"].is_file():
+                mask = tifffile.imread(str(paths["mask"]))
+                n_cells = int(np.unique(mask[mask != 0]).size)
+                _report_progress(
+                    logger,
+                    progress_callback,
+                    f"[{filename}] reutilizando variante QC {variant['variant_id']} "
+                    f"({n_cells} célula(s)); Cellpose no se ejecutó.",
+                )
+                cache["active_variant_id"] = variant["variant_id"]
+                cache["finalized"] = cache.get("finalized_variant_id") == variant["variant_id"]
+                phase1_cache.write_cache(figures_dir, cache)
+                return {
+                    "context": ctx,
+                    "mask": mask,
+                    "variant": variant,
+                    "comparison": comparison,
+                    "reused": True,
+                    "n_cells": n_cells,
+                }
+
     # --- Segmentación 3D (import diferido de cellpose dentro del módulo) ---
     import segment_cellpose_3d  # noqa: E402
 
     _report_progress(logger, progress_callback, f"[{filename}] iniciando segmentación 3D")
     t0 = time.time()
-    mask = segment_cellpose_3d.segment_3d_cellpose(volume, config, px_xy_um, px_z_um)
+    mask, segment_info = segment_cellpose_3d.segment_3d_cellpose(
+        ctx["volume"],
+        config,
+        ctx["px_xy_um"],
+        ctx["px_z_um"],
+        return_info=True,
+    )
     seg_secs = time.time() - t0
 
     n_cells = int(np.unique(mask[mask != 0]).size)
@@ -168,10 +245,124 @@ def process_image(row, config, logger, volume=None, progress_callback=None):
     if n_cells == 0:
         logger.warning(f"[{filename}] 0 células detectadas por Cellpose.")
 
-    # --- Guardar máscara 3D etiquetada ---
-    mask_path = os.path.join(out_paths["masks_3d"], f"{file_stem}_masks_3d.tif")
-    io_utils.save_tiff(mask_path, mask.astype(np.uint16))
-    _report_progress(logger, progress_callback, f"[{filename}] máscara guardada: {mask_path}")
+    signature = phase1_cache.build_phase1_signature(
+        ctx["source_path"],
+        filename,
+        file_stem,
+        ctx["volume"],
+        ctx["px_xy_um"],
+        ctx["px_z_um"],
+        ctx["channel"],
+        config,
+        segment_info=segment_info,
+    )
+    existing_ids = [v.get("variant_id") for v in cache.get("variants", [])]
+    variant_id = phase1_cache.make_variant_id(
+        signature, existing_ids=existing_ids, force_suffix=force_new
+    )
+    paths = phase1_cache.variant_paths(phase1_dir, file_stem, variant_id)
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    io_utils.save_tiff(str(paths["mask"]), mask.astype(np.uint16))
+    _report_progress(
+        logger,
+        progress_callback,
+        f"[{filename}] máscara QC guardada: {paths['mask']}",
+    )
+
+    _report_progress(logger, progress_callback, f"[{filename}] generando figuras QC")
+    visualize_qc.create_qc_figures(
+        ctx["volume"],
+        mask,
+        file_stem,
+        projections_dir=str(paths["max_projection"].parent),
+        figures_dir=str(paths["qc_overlay"].parent),
+        config=config,
+    )
+    _report_progress(
+        logger,
+        progress_callback,
+        f"[{filename}] variante QC generada: {variant_id}",
+    )
+
+    variant = {
+        "variant_id": variant_id,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "signature": signature,
+        "assets": {key: str(path) for key, path in paths.items()},
+        "n_cells": n_cells,
+        "finalized": False,
+    }
+    cache = phase1_cache.add_or_update_variant(cache, variant)
+    phase1_cache.write_cache(figures_dir, cache)
+    return {
+        "context": ctx,
+        "mask": mask,
+        "variant": variant,
+        "comparison": {"compatible": True, "blocking_reasons": [], "warnings": []},
+        "reused": False,
+        "n_cells": n_cells,
+    }
+
+
+def finalize_phase1(
+    row,
+    config,
+    logger,
+    volume=None,
+    progress_callback=None,
+    variant_id=None,
+):
+    """Finaliza una variante QC y escribe las salidas canónicas de Fase 1."""
+    ctx = _prepare_phase1_context(row, config, logger, volume, progress_callback)
+    filename = ctx["filename"]
+    file_stem = ctx["file_stem"]
+    out_paths = ctx["out_paths"]
+    phase1_dir = ctx["image_output_dir"]
+    cache = phase1_cache.load_cache(out_paths["figures_qc"])
+
+    variant_id = variant_id or cache.get("active_variant_id")
+    variant = phase1_cache.get_variant(cache, variant_id)
+    if variant is None:
+        raise ValueError(
+            f"[{filename}] no hay variante QC activa. Ejecuta Generar y luego Finalizar Fase 1."
+        )
+
+    current_signature = phase1_cache.build_phase1_signature(
+        ctx["source_path"],
+        filename,
+        file_stem,
+        ctx["volume"],
+        ctx["px_xy_um"],
+        ctx["px_z_um"],
+        ctx["channel"],
+        config,
+    )
+    comparison = phase1_cache.compare_phase1_signature(
+        variant.get("signature", {}), current_signature
+    )
+    if not comparison["compatible"]:
+        reasons = "; ".join(comparison["blocking_reasons"])
+        raise ValueError(f"[{filename}] cache incompatible: {reasons}")
+
+    variant_paths = phase1_cache.variant_paths(phase1_dir, file_stem, variant_id)
+    if not variant_paths["mask"].is_file():
+        raise FileNotFoundError(
+            f"[{filename}] falta la máscara de la variante QC: {variant_paths['mask']}"
+        )
+
+    mask = tifffile.imread(str(variant_paths["mask"]))
+    n_cells = int(np.unique(mask[mask != 0]).size)
+
+    # --- Guardar máscara 3D etiquetada canónica ---
+    canonical = phase1_cache.canonical_paths(phase1_dir, file_stem)
+    io_utils.save_tiff(str(canonical["mask"]), mask.astype(np.uint16))
+    _report_progress(
+        logger,
+        progress_callback,
+        f"[{filename}] máscara guardada: {canonical['mask']}",
+    )
 
     # --- Mediciones por célula ---
     # Limpia mallas previas de esta imagen para que una re-ejecución no deje
@@ -182,24 +373,22 @@ def process_image(row, config, logger, volume=None, progress_callback=None):
 
     df = measure_3d.measure_cells_3d(
         mask,
-        px_xy_um,
-        px_z_um,
+        ctx["px_xy_um"],
+        ctx["px_z_um"],
         config,
         meshes_dir=out_paths["meshes"],
         filename_stem=file_stem,
     )
     # Inserta la columna 'filename' al inicio (requerida en el CSV).
     df.insert(0, "filename", filename)
-    csv_path = os.path.join(
-        out_paths["measurements"], f"{file_stem}_measurements_3d.csv"
-    )
+    csv_path = str(canonical["measurements"])
     df.to_csv(csv_path, index=False)
     _report_progress(logger, progress_callback, f"[{filename}] mediciones guardadas: {csv_path}")
 
     # --- QC: proyecciones + overlay ---
     _report_progress(logger, progress_callback, f"[{filename}] generando figuras QC")
     visualize_qc.create_qc_figures(
-        volume,
+        ctx["volume"],
         mask,
         file_stem,
         projections_dir=out_paths["projections"],
@@ -208,7 +397,34 @@ def process_image(row, config, logger, volume=None, progress_callback=None):
     )
     _report_progress(logger, progress_callback, f"[{filename}] figuras QC y proyecciones generadas.")
 
+    assets = dict(canonical)
+    assets["meshes_dir"] = out_paths["meshes"]
+    cache = phase1_cache.mark_finalized(cache, variant_id, assets)
+    phase1_cache.write_cache(out_paths["figures_qc"], cache)
     return n_cells
+
+
+def process_image(row, config, logger, volume=None, progress_callback=None):
+    """Procesa una imagen completa: genera QC y finaliza Fase 1.
+
+    Lanza excepciones que el llamador captura para continuar con la siguiente.
+    """
+    qc_result = generate_phase1_qc(
+        row,
+        config,
+        logger,
+        volume=volume,
+        progress_callback=progress_callback,
+        use_cache=False,
+    )
+    return finalize_phase1(
+        row,
+        config,
+        logger,
+        volume=qc_result["context"]["volume"],
+        progress_callback=progress_callback,
+        variant_id=qc_result["variant"]["variant_id"],
+    )
 
 
 def main(argv=None, progress_callback=None):
@@ -262,6 +478,7 @@ def main(argv=None, progress_callback=None):
                 "px_xy_um": px_xy,
                 "px_z_um": px_z,
                 "channel_to_segment": args.channel,
+                "source_path": args.czi,
             }
             if progress_callback is None:
                 n_cells = process_image(row, config, logger, volume=volume)

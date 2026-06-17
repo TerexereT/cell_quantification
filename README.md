@@ -65,6 +65,16 @@ Los valores iniciales salen de `config/config.yaml`. Puedes cambiarlos en el
 formulario antes de ejecutar; esos cambios aplican solo a esa corrida y no
 sobrescriben el YAML.
 
+En Fase 1 hay dos acciones separadas:
+
+- **Generar**: crea una variante QC para revisar si Cellpose segmenta bien. No
+  escribe las mediciones finales ni las mallas.
+- **Finalizar**: confirma la variante activa y crea la máscara, CSV y mallas que
+  Fase 2 necesita. Fase 2 queda bloqueada hasta que esta acción termine.
+
+Si vuelves a usar parámetros ya generados, la app pregunta antes de reutilizar
+el cache. El mensaje indica qué se reutiliza y evita ejecutar Cellpose otra vez.
+
 La salida mantiene la misma estructura que el CLI:
 
 ```text
@@ -179,7 +189,8 @@ qc:
   save_mask_projection: true
 ```
 
-Guía de ajuste rápido (revisa `output/<nombre>/1/figures_qc/*_qc_overlay.png` después de cada corrida):
+Guía de ajuste rápido (en la app pulsa **Generar** y revisa
+`output/<nombre>/1/figures_qc/variants/<variante>/*_qc_overlay.png`):
 
 | Lo que ves en el overlay       | Parámetro            | Acción                  |
 | ------------------------------ | -------------------- | ----------------------- |
@@ -203,7 +214,24 @@ cellpose:
 
 Las salidas quedan en `output/<nombre_imagen>/1/`:
 
-Orden de generación:
+Durante el ajuste con **Generar**, las variantes se guardan en subcarpetas:
+
+```text
+masks_3d/variants/<variant_id>/<nombre>_masks_3d.tif
+projections/variants/<variant_id>/<nombre>_max_projection.tif
+projections/variants/<variant_id>/<nombre>_mask_projection.tif
+figures_qc/variants/<variant_id>/<nombre>_qc_overlay.png
+figures_qc/medidas.md
+figures_qc/phase1_cache.json
+```
+
+`figures_qc/medidas.md` contiene solo las medidas/parametros `key=value` para
+lectura manual. `figures_qc/phase1_cache.json` contiene el estado estructurado
+que usa la app para saber si puede reutilizar una variante. Si el cache no
+coincide, la app muestra qué cambió: parámetros, CZI, canal, calibración o forma
+del volumen.
+
+Al pulsar **Finalizar** o al usar el CLI completo, se crean las salidas canónicas:
 
 | Orden | Carpeta         | Archivo                        | Contenido                                                    |
 | ----- | --------------- | ------------------------------ | ------------------------------------------------------------ |
@@ -213,6 +241,8 @@ Orden de generación:
 | 4     | `projections/`  | `<nombre>_max_projection.tif`  | Proyección de intensidad máxima de la imagen segmentada      |
 | 5     | `projections/`  | `<nombre>_mask_projection.tif` | Proyección máxima de la máscara                              |
 | 6     | `figures_qc/`   | `<nombre>_qc_overlay.png`      | 3 paneles: original / máscara / overlay                      |
+| 7     | `figures_qc/`   | `medidas.md`                   | Medidas/parametros legibles en `key=value`                   |
+| 8     | `figures_qc/`   | `phase1_cache.json`            | Cache estructurado con variante activa/finalizada            |
 
 Para entrada CZI, `<nombre>` sale del nombre del archivo `.czi` sin extensión.
 Ejemplo: `imagen.czi` genera `output/imagen/1/`.
@@ -229,7 +259,10 @@ Los `bbox_*` son índices en voxeles (inclusivos) del bounding box 3D.
 
 ### Prerequisitos
 
-- Haber ejecutado la Fase 1 al menos una vez (carpetas `output/*/1/masks_3d/` deben existir).
+- Haber finalizado la Fase 1 para ese CZI. En la app: pulsa **Generar** hasta
+  elegir una segmentación correcta y luego **Finalizar**.
+- Debe existir `output/<nombre>/1/masks_3d/<nombre>_masks_3d.tif` y
+  `output/<nombre>/1/figures_qc/phase1_cache.json` marcado como finalizado.
 - Tener el archivo `.czi` original con ambos canales (rojo = AF647, azul = DAPI).
 - `czifile` instalado (`pip install czifile`).
 
@@ -239,8 +272,9 @@ Los `bbox_*` son índices en voxeles (inclusivos) del bounding box 3D.
 .\venv\Scripts\python.exe tools/phase2_intensity.py "C:\ruta\a\imagen.czi" output/
 ```
 
-El script descubre automáticamente todas las subcarpetas de `output/` que contengan
-`masks_3d/` y las procesa en secuencia.
+El script procesa la máscara finalizada de la subcarpeta que coincide con el
+nombre del CZI. Si solo hay una variante QC pendiente, se detiene con un mensaje
+indicando que debes ejecutar **Finalizar Fase 1**.
 
 ### Parametrizar el umbral de clasificación
 

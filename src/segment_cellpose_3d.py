@@ -146,7 +146,7 @@ def _build_eval_kwargs(model, cfg, anisotropy):
     return eval_kwargs
 
 
-def segment_3d_cellpose(image, config, px_xy_um, px_z_um):
+def segment_3d_cellpose(image, config, px_xy_um, px_z_um, return_info=False):
     """Segmenta un z-stack en 3D con Cellpose.
 
     Parameters
@@ -173,10 +173,11 @@ def segment_3d_cellpose(image, config, px_xy_um, px_z_um):
     # cuánto más "separados" están los cortes Z respecto a los pixeles XY.
     anisotropy = float(px_z_um) / float(px_xy_um)
 
+    gpu_resolved = _resolve_gpu(cfg.get("gpu", False))
     model = _build_model(
         cellpose_models,
         model_type=cfg.get("model_type"),
-        gpu=_resolve_gpu(cfg.get("gpu", False)),
+        gpu=gpu_resolved,
     )
 
     eval_kwargs = _build_eval_kwargs(model, cfg, anisotropy)
@@ -191,4 +192,10 @@ def segment_3d_cellpose(image, config, px_xy_um, px_z_um):
     # Descarta objetos demasiado pequeños.
     masks = filter_small_objects(masks, cfg.get("min_size_voxels", 0))
 
+    if return_info:
+        return masks, {
+            "anisotropy": anisotropy,
+            "gpu_resolved": gpu_resolved,
+            "eval_kwargs": eval_kwargs,
+        }
     return masks
